@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ingest-skill"
+version = "0.1.0"
+description = "Verified media offload from camera cards and recorders: sha256 read-back on every copy, dual backup, manifest and clip inventory. Local, no network."
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.9"
+authors = [{name = "kajisho5"}]
+keywords = ["media", "offload", "ingest", "backup", "checksum", "sha256", "dit", "camera-card", "agent-skill", "video-production"]
+dependencies = []
+
+[project.scripts]
+ingest = "ingest_skill.cli:main"
+
+[project.urls]
+Repository = "https://github.com/kajisho5/ingest-skill"
+
+[tool.setuptools.packages.find]
+where = ["src"]
