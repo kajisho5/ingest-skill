@@ -5,7 +5,7 @@ Written from a read-only audit of this repository on 2026-10-30. Each step below
 
 ## Where it stands
 
-v0.1.0 on main, SKILL.md on the default branch. Python 3.9+ stdlib (`xxhash` optional). `ingest offload | verify | inventory | contract | doctor`; sha256 or xxh64 read-back, never overwrites, resumable, manifest and ASC MHL history per destination. 22 tests, CI on 3 OSes × Python 3.9 / 3.11 / 3.12 (3.9 on ubuntu-24.04, see ADR-002).
+v0.1.0 on main, SKILL.md on the default branch. Python 3.9+ stdlib (`xxhash` optional). `ingest offload | verify | inventory | contract | doctor`; sha256 or xxh64 read-back, never overwrites, resumable, manifest and ASC MHL history per destination; card-structure-aware inventory (one clip per recording, camera sidecars, reel / card id, ADR-003). 40 tests, CI on 3 OSes × Python 3.9 / 3.11 / 3.12 (3.9 on ubuntu-24.04, see ADR-002), contract validated against the OS schema in CI.
 
 ## What this repository owns
 
@@ -15,7 +15,7 @@ v0.1.0 on main, SKILL.md on the default branch. Python 3.9+ stdlib (`xxhash` opt
 |---|---|---|
 | 素材取り込み(検証付きコピー) | done |  |
 | 二重バックアップ | done | destinations copied one after another; the source is re-read per destination |
-| 素材台帳 | partial | ffprobe facts + timecode; no spanned-clip / card-structure awareness, no sidecars |
+| 素材台帳 | done | one clip per recording (Sony XDCAM / XAVC, XDCAM EX, AVCHD, BRAW, generic), camera sidecars, reel / card id, ffprobe facts; P2 / Canon XF / RED listed file by file |
 | URL素材取得 | missing | owned here since 2026-10-30 (owner decision); the agent's yt-dlp call (`agent/ingest.py`) moves here |
 
 ## Wiring
@@ -24,13 +24,13 @@ No adapter in the agent. Calls ffprobe directly; proxies stay with ffmpeg-skill 
 
 ## Steps
 
-- [x] **1. Contract fits the OS schema** — `skill` as an object (or drop it), ffprobe under capabilities.optional, SOURCE_CHANGED in ERRORS, a jsonschema test against the OS schema
+- [x] **1. Contract fits the OS schema** — `skill` as an object (or drop it), ffprobe under capabilities.optional, SOURCE_CHANGED in ERRORS, a jsonschema test against the OS schema (the jsonschema test landed with step 4, [#7](https://github.com/kajisho5/ingest-skill/pull/7))
   - Done when: contract validates against registry/capability_contract.schema.json in CI
 - [x] **2. Merge to main; CI on Python 3.9 / 3.11 / 3.12** ([#6](https://github.com/kajisho5/ingest-skill/pull/6))
   - Done when: CI green; SKILL.md on the default branch (marketplace install shows 1 skill)
 - [x] **3. ASC MHL output + xxHash64** — MHL per destination; `verify` accepts sha256 or xxh64 ([#5](https://github.com/kajisho5/ingest-skill/pull/5))
   - Done when: MHL round-trips; verify passes on both hash kinds
-- [ ] **4. Card-structure-aware inventory** — group spanned clips (XDCAM/AVCHD/BRAW/etc.), read camera sidecars, reel/card naming
+- [x] **4. Card-structure-aware inventory** — group spanned clips (XDCAM/AVCHD/BRAW/etc.), read camera sidecars, reel/card naming ([#7](https://github.com/kajisho5/ingest-skill/pull/7))
   - Done when: fixture card trees give one clip per recording
 - [ ] **5. Read the source once for all destinations** — single read, fan-out writes
   - Done when: a test counts one read per file
