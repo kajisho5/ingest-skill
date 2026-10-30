@@ -136,6 +136,22 @@ class InventoryAndContractTests(unittest.TestCase):
         code, out = run_cli("contract")
         self.assertEqual(json.loads(out)["version"], c["version"])
 
+    def test_contract_fits_the_os_registry_schema(self):
+        # The parts of the OS registry/capability_contract.schema.json that constrain types, checked with the stdlib.
+        c = contract()
+        self.assertIsInstance(c["skill"], dict)
+        self.assertEqual((c["skill"]["id"], c["skill"]["version"]), (c["skill_id"], c["version"]))
+        self.assertIsInstance(c["contract_version"], str)
+        for p in c["provides"]:
+            self.assertEqual(set(p), {"id", "lifecycle", "tool_id"})
+            self.assertIn(p["lifecycle"], ("PROPOSED", "EXPERIMENTAL", "STABLE", "DEPRECATED", "RETIRED"))
+        self.assertEqual(len({p["id"] for p in c["provides"]}), len(c["provides"]))
+        for d in c["dependencies"]:
+            self.assertTrue(d.get("skill_id") and d.get("version_range"), d)
+        self.assertEqual([o["id"] for o in c["capabilities"]["optional"]], ["ffprobe"])
+        for code in ("SOURCE_CHANGED", "VERIFY_MISMATCH"):
+            self.assertIn(code, c["errors"])
+
     def test_inventory_lists_media_with_manifest_hashes(self):
         tmp = Path(tempfile.mkdtemp())
         card = make_card(tmp)
