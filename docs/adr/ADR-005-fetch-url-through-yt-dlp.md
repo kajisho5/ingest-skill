@@ -22,7 +22,7 @@ What a download adds to an offload, and what it must not change:
 
 ## Decision
 
-1. **yt-dlp is an optional extra, called as a library.** `pip install "ingest-skill[fetch]"` adds `yt-dlp>=2024.8.6`. `fetch` calls `yt_dlp.YoutubeDL(params).extract_info(url, …)`.
+1. **yt-dlp is an optional extra, called as a library.** `pip install "ingest-skill[fetch]"` adds yt-dlp (`>=2024.8.6` when this ADR was written; now `>=2026.7.4`, or `>=2025.10.14` on Python 3.9, see ADR-006). `fetch` calls `yt_dlp.YoutubeDL(params).extract_info(url, …)`.
    - **Why a library and not a subprocess:**
      - There is no command line at all. The URL is one Python string handed to yt-dlp, never interpolated into a shell or parsed as an option. A subprocess also avoids the shell, but a URL that starts with `-` then needs a `--` separator, and every option is a string to get right.
      - What `fetch` needs to record comes back as a structured value: `extractor`, `format_id`, `requested_downloads[].filepath`, `is_live`. A subprocess would have to parse `--dump-json` / `--print` output.
@@ -91,7 +91,7 @@ What a download adds to an offload, and what it must not change:
   - Unit tests of the redaction rules, including AWS, CloudFront, path parameters and harmless parameters left alone.
   - With the extra installed (CI's second run): the **real yt-dlp** downloads a fixture file from an HTTP server on 127.0.0.1, which is the roadmap's "fixture URL (local HTTP server)". The URL carries userinfo and a token. Both destinations verify, and the manifest has neither secret. A missing file on that server is `FETCH_FAILED`.
   - `INGEST_FETCH_NETWORK_URL=<url>` runs one real internet download. It is skipped by default.
-- CI runs the suite with the standard library only (fake yt-dlp, `FETCH_UNAVAILABLE` checked), then with `.[xxhash,fetch]` (the loopback test), on 3 OSes × Python 3.9 / 3.11 / 3.12 (ADR-002). yt-dlp 2026.10.26 needs Python 3.11 or later; on 3.9, pip installs the newest yt-dlp release that supports 3.9.
+- CI runs the suite with the standard library only (fake yt-dlp, `FETCH_UNAVAILABLE` checked), then with `.[xxhash,fetch]` (the loopback test), on 3 OSes × Python 3.9 / 3.11 / 3.12 (ADR-002). yt-dlp 2026.10.26 needs Python 3.11 or later; on 3.9, pip installs the newest yt-dlp release that supports 3.9 (2025.10.14, which still has published advisories: ADR-006).
 
 ## Consequences
 
