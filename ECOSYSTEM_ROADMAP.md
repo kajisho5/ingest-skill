@@ -28,7 +28,7 @@ No adapter in the agent. Calls ffprobe directly; proxies stay with ffmpeg-skill 
   - Done when: contract validates against registry/capability_contract.schema.json in CI
 - [ ] **2. Merge to main; CI on Python 3.9 / 3.11 / 3.12**
   - Done when: CI green; SKILL.md on the default branch (marketplace install shows 1 skill)
-- [ ] **3. ASC MHL output + xxHash64** — MHL per destination; `verify` accepts sha256 or xxh64
+- [x] **3. ASC MHL output + xxHash64** — MHL per destination; `verify` accepts sha256 or xxh64 ([#5](https://github.com/kajisho5/ingest-skill/pull/5))
   - Done when: MHL round-trips; verify passes on both hash kinds
 - [ ] **4. Card-structure-aware inventory** — group spanned clips (XDCAM/AVCHD/BRAW/etc.), read camera sidecars, reel/card naming
   - Done when: fixture card trees give one clip per recording
