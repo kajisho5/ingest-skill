@@ -14,20 +14,22 @@
 
 <p align="center"><b>Verified media offload from cards and recorders</b></p>
 
-Verified media offload for camera cards and recorders: every copy is checked by a sha256 read-back, nothing is ever overwritten, an interrupted offload resumes, and a backup can be re-verified at any time. Part of the [AI Video Production OS](https://github.com/kajisho5/AI-video-production-OS) ecosystem (Ingest department), and usable on its own.
+Verified media offload for camera cards and recorders: every copy is checked by a sha256 (or xxh64) read-back, nothing is ever overwritten, an interrupted offload resumes, every destination carries an ASC MHL history, and a backup can be re-verified at any time. Part of the [AI Video Production OS](https://github.com/kajisho5/AI-video-production-OS) ecosystem (Ingest department), and usable on its own.
 
 ```bash
 pip install -e .
 ingest offload /Volumes/CARD_A --dest /Volumes/SSD1/Footage --dest /Volumes/SSD2/Footage --project 2026-10-30_event
 ingest verify  /Volumes/SSD1/Footage/2026-10-30_event/CARD_A
+pip install -e ".[xxhash]"   # optional: --hash xxh64
+ingest offload /Volumes/CARD_B --dest /Volumes/SSD1/Footage --project 2026-10-30_event --hash xxh64
 ingest inventory /Volumes/SSD1/Footage/2026-10-30_event/CARD_A --json
 ```
 
-- **offload**: copies every file of the card folder to each destination (`<dest>/<project>/<card name>/...`), through a temporary file, fsync and rename, then reads it back and compares sha256. Writes `ingest-manifest.json` in each destination. Identical existing files are skipped (resume); different ones are reported as conflicts and never overwritten.
-- **verify**: re-hashes a destination against its manifest: missing, changed and unlisted files.
+- **offload**: copies every file of the card folder to each destination (`<dest>/<project>/<card name>/...`), through a temporary file, fsync and rename, then reads it back and compares the hashes (`--hash sha256`, the default, or `--hash xxh64`). Writes `ingest-manifest.json` and appends a generation to an **ASC MHL** history (`ascmhl/`, process `transfer`; c4 with sha256, xxh64 with xxh64) in each destination. A source that already has an `ascmhl/` history keeps it: the copy continues that chain. Identical existing files are skipped (resume); different ones are reported as conflicts and never overwritten.
+- **verify**: re-hashes a destination against its manifest (sha256 or xxh64) and its ASC MHL history, which is checked against its chain: missing, changed and unlisted files, each failure with a code, the expected and the actual hash. Works from the ASC MHL history alone, including one written by another ASC MHL tool. Writes nothing.
 - **inventory**: clip list with size, manifest hash and, when `ffprobe` is installed, duration, codecs, resolution, frame rate, timecode and creation time.
 - **contract / doctor**: machine-readable declaration and environment check for agents.
 
-Exit codes: `0` ok, `2` refused (nothing written), `3` incomplete. Python 3.9+, standard library only; `ffprobe` is optional (inventory facts are reported as unknown without it). No network access. See [SKILL.md](SKILL.md) for the agent-facing rules.
+Exit codes: `0` ok, `2` refused (nothing written), `3` incomplete. Python 3.9+, standard library only; `xxhash` is an optional extra (`pip install "ingest-skill[xxhash]"`; without it `--hash xxh64` is refused as `HASH_UNAVAILABLE` and `ingest doctor` reports it unavailable) and `ffprobe` is optional (inventory facts are reported as unknown without it). No network access. See [SKILL.md](SKILL.md) for the agent-facing rules and [docs/adr](docs/adr) for design decisions.
 
-Not yet: MHL / ASC MHL manifests, xxHash, parallel destinations.
+Not yet: ASC MHL directory hashes, rename, flatten and collections; recording a verify run as an ASC MHL generation; parallel destinations.

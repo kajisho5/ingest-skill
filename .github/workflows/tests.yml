@@ -18,5 +18,10 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install -e .
+      # Standard library only: --hash xxh64 must be refused as HASH_UNAVAILABLE, sha256 + c4 must work.
       - run: python -m unittest -v tests/test_ingest.py
       - run: ingest contract --json
+      - run: pip install -e ".[xxhash]"
+      # With the optional extra: the xxh64 offload / ASC MHL / verify tests run too.
+      - run: python -m unittest -v tests/test_ingest.py
+      - run: ingest doctor --json
