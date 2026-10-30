@@ -33,12 +33,14 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - run: pip install -e .
-      # Standard library only: --hash xxh64 must be refused as HASH_UNAVAILABLE, sha256 + c4 must work.
+      # Standard library only: --hash xxh64 must be refused as HASH_UNAVAILABLE, sha256 + c4 must work; fetch is tested
+      # against a fake yt-dlp module and must be refused as FETCH_UNAVAILABLE without one.
       - run: python -m unittest discover -v -s tests
       - run: ingest contract --json
-      # With the optional extra: the xxh64 offload / ASC MHL / verify tests run too. jsonschema is a test-only tool
+      # With the optional extras: the xxh64 offload / ASC MHL / verify tests run too, and `ingest fetch` runs through the
+      # real yt-dlp against a local HTTP server on 127.0.0.1 (no internet; ADR-005). jsonschema is a test-only tool
       # (not a dependency): with it, `ingest contract --json` must validate against the OS schema (required here).
-      - run: pip install -e ".[xxhash]" jsonschema
+      - run: pip install -e ".[xxhash,fetch]" jsonschema
       - run: python -m unittest discover -v -s tests
         env:
           INGEST_REQUIRE_CONTRACT_SCHEMA: "1"

@@ -5,7 +5,7 @@ Written from a read-only audit of this repository on 2026-10-30. Each step below
 
 ## Where it stands
 
-v0.1.0 on main, SKILL.md on the default branch. Python 3.9+ stdlib (`xxhash` optional). `ingest offload | verify | inventory | contract | doctor`; sha256 or xxh64 read-back, never overwrites, resumable, manifest and ASC MHL history per destination; card-structure-aware inventory (one clip per recording, camera sidecars, reel / card id, ADR-003); the source read once for every destination (ADR-004). 47 tests, CI on 3 OSes × Python 3.9 / 3.11 / 3.12 (3.9 on ubuntu-24.04, see ADR-002), contract validated against the OS schema in CI.
+v0.1.0 on main, SKILL.md on the default branch. Python 3.9+ stdlib (`xxhash` and `yt-dlp` optional). `ingest offload | verify | inventory | fetch | contract | doctor`; sha256 or xxh64 read-back, never overwrites, resumable, manifest and ASC MHL history per destination; card-structure-aware inventory (one clip per recording, camera sidecars, reel / card id, ADR-003); the source read once for every destination (ADR-004); `ingest fetch <url>` downloads through yt-dlp and offloads like a card, with a redacted download record (ADR-005). 59 tests, CI on 3 OSes × Python 3.9 / 3.11 / 3.12 (3.9 on ubuntu-24.04, see ADR-002), contract validated against the OS schema in CI.
 
 ## What this repository owns
 
@@ -16,7 +16,7 @@ v0.1.0 on main, SKILL.md on the default branch. Python 3.9+ stdlib (`xxhash` opt
 | 素材取り込み(検証付きコピー) | done |  |
 | 二重バックアップ | done | the source is read once per file and written to every destination in parallel; each destination read back and verified on its own; a failed drive does not stop the others (ADR-004) |
 | 素材台帳 | done | one clip per recording (Sony XDCAM / XAVC, XDCAM EX, AVCHD, BRAW, generic), camera sidecars, reel / card id, ffprobe facts; P2 / Canon XF / RED listed file by file |
-| URL素材取得 | missing | owned here since 2026-10-30 (owner decision); the agent's yt-dlp call (`agent/ingest.py`) moves here |
+| URL素材取得 | done | `ingest fetch <url>` ([#9](https://github.com/kajisho5/ingest-skill/pull/9), ADR-005); the agent still has its own yt-dlp call (`agent/ingest.py`) until it switches to `ingest fetch` |
 
 ## Wiring
 
@@ -36,12 +36,12 @@ No adapter in the agent. Calls ffprobe directly; proxies stay with ffmpeg-skill 
   - Done when: a test counts one read per file
 - [ ] **6. Agent adapter + SkillSpec media_offload** — inventory becomes OBSERVED observations on new assets
   - Done when: `video-agent plan <card>` offloads then analyses, with provenance
-- [ ] **7. `ingest fetch <url>`** — URL download through yt-dlp (optional dependency, reported by doctor), the same verify + manifest + inventory as a card, source URL and extractor version recorded
+- [x] **7. `ingest fetch <url>`** — URL download through yt-dlp (optional dependency, reported by doctor), the same verify + manifest + inventory as a card, source URL and extractor version recorded ([#9](https://github.com/kajisho5/ingest-skill/pull/9), ADR-005; the agent's switch to `ingest fetch` is its own change)
   - Done when: a fixture URL (local HTTP server) lands with a manifest; the agent calls ingest-skill instead of yt-dlp
 
 ## Boundaries
 
-URL download (URL素材取得) is owned here since 2026-10-30 (owner decision); until step 7 ships, the agent keeps its own yt-dlp call.
+URL download (URL素材取得) is owned here since 2026-10-30 (owner decision) and ships as `ingest fetch` (step 7); the agent keeps its own yt-dlp call only until it switches to `ingest fetch ... --json`.
 
 ---
 Engine for every media operation: [ffmpeg-skill](https://github.com/kajisho5/ffmpeg-skill) (42 tools, treated as complete). Orchestrator: [video-production-agent](https://github.com/kajisho5/video-production-agent).

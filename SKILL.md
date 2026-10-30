@@ -1,6 +1,6 @@
 ---
 name: ingest-skill
-description: Offload camera cards and recorders safely - copy a card folder to one or more drives with a sha256 (or xxh64) read-back of every file, write an ASC MHL history per drive, never overwrite, resume an interrupted copy, re-verify a backup later and list the clips (duration, codecs, resolution, timecode). Use when asked to ingest, offload, back up or verify footage, make an MHL, or make a clip list of a shoot (one entry per recording, spanned files grouped, camera sidecars, reel / card id). Local only, no network.
+description: Offload camera cards and recorders safely - copy a card folder to one or more drives with a sha256 (or xxh64) read-back of every file, write an ASC MHL history per drive, never overwrite, resume an interrupted copy, re-verify a backup later and list the clips (duration, codecs, resolution, timecode). Use when asked to ingest, offload, back up or verify footage, make an MHL, or make a clip list of a shoot (one entry per recording, spanned files grouped, camera sidecars, reel / card id), or to download a video URL as verified footage (`ingest fetch`, yt-dlp). Local, except `fetch`.
 ---
 
 # ingest-skill
@@ -15,6 +15,7 @@ Run `ingest <command> ... --json` (installed by `pip install -e .`). Every comma
 | Re-check a backup | `ingest verify /Volumes/SSD1/Footage/2026-10-30_event/CARD_A --json` |
 | Clip list | `ingest inventory /Volumes/SSD1/Footage/2026-10-30_event/CARD_A --json` |
 | Name the copy after the card's reel | add `--name-by reel` to offload (`--reel B007` to set it yourself) |
+| Download a video URL as footage | `ingest fetch "<url>" --dest /Volumes/SSD1/Footage --project 2026-10-30_event --json` (needs `pip install -e ".[fetch]"`; check `yt-dlp` in `ingest doctor --json`) |
 | What this skill declares | `ingest contract --json`, `ingest doctor --json` |
 
 ## What it guarantees
@@ -28,8 +29,13 @@ Run `ingest <command> ... --json` (installed by `pip install -e .`). Every comma
 - Every file of the card is copied unchanged, whatever its structure: sidecars, index files, playlists and proxies are needed by NLEs, so never copy only the media files.
 - Card housekeeping (`.DS_Store`, `._*`, `.Spotlight-V100`, `System Volume Information`, ...) and symbolic links are listed as skipped, never copied or followed.
 - A destination inside the source (or the other way round), the same destination twice, or no destination is refused before anything is written (exit 2).
+- `fetch` downloads one video into a staging folder, then copies it exactly like a card (read-back, manifest, ASC MHL), so `verify` and `inventory` work on it. The manifest's `fetch` record holds the source URL with credentials removed (userinfo, token / signature / key / password-like parameter values), the extractor, the yt-dlp version, the selected `format_id` and the times; never cookies or request headers.
 
-Exit codes: `0` ok, `2` refused (including `HASH_UNAVAILABLE`: xxh64 without the xxhash extra, and `REEL_INVALID`), `3` incomplete (conflict, failure, missing or changed file, damaged ASC MHL history).
+## Rights
+
+Fetch only what the user has the right to download (their own footage, licensed or permitted material); if that is unclear, ask before fetching. There is no DRM, login or cookie option, and none should be worked around: a protected or login-only video fails as `FETCH_FAILED`, report it as such.
+
+Exit codes: `0` ok, `2` refused (including `HASH_UNAVAILABLE`: xxh64 without the xxhash extra, `FETCH_UNAVAILABLE`: fetch without the yt-dlp extra, `URL_INVALID`, `NAME_INVALID` and `REEL_INVALID`), `3` incomplete (including `FETCH_FAILED`) (conflict, failure, missing or changed file, damaged ASC MHL history).
 
 ## Report it honestly
 
@@ -37,6 +43,7 @@ Exit codes: `0` ok, `2` refused (including `HASH_UNAVAILABLE`: xxh64 without the
 - When one destination has `failed` files, name that drive: the other destinations are complete. Its `ingest-manifest.json` lists the files under `failed` and its `verify` is not ok (`copy_failed`); re-run the same offload after fixing the drive to complete it (only the missing files are written).
 - `mhl_failed` or an `action="failed"` record means a file differs from what its ASC MHL history recorded earlier: report it as damage, not as a new version.
 - If xxh64 is `unavailable` in `doctor`, say so and offer sha256 (the default) or installing the extra; do not fall back silently.
+- If `yt-dlp` is `unavailable` in `doctor`, `fetch` is refused: say so and offer installing the extra; do not download some other way. Quote URLs from the `fetch` record (redacted), never the one the user pasted if it carried a token. When `staging.kept` is true, the download is still in `staging.path`: say so.
 - `inventory` lists recordings, not files: a `spanned` clip's `members` are one recording in order; an `incomplete` one continues on another card. Report the clip count from `clip_count`, and the reel with its `source` (`operator`, `manifest`, `clip_names`, `fingerprint`); a `fingerprint` reel is not a camera reel.
 - Sidecar `metadata` holds only what the camera wrote; a missing key is unknown. `warnings` (a clip missing from MEDIAPRO.XML, an unreadable playlist or sidecar) are card-health notes to pass on.
 - `inventory` reads clip facts with `ffprobe`. When `probed` is false the facts are **unknown**, not zero (ffprobe missing, or a file it cannot read).
@@ -44,4 +51,4 @@ Exit codes: `0` ok, `2` refused (including `HASH_UNAVAILABLE`: xxh64 without the
 
 ## Not this skill's job
 
-Editing or transcoding (video-editing-skill / ffmpeg-skill), proxies (ffmpeg-skill `proxy`), cloud upload (publish-skill), deleting or formatting the card, ASC MHL directory hashes / rename / flatten / collections (not yet), P2 / Canon XF / RED structures (listed as generic files).
+Playlists, logins / cookies and DRM-protected media in `fetch`; editing or transcoding (video-editing-skill / ffmpeg-skill), proxies (ffmpeg-skill `proxy`), cloud upload (publish-skill), deleting or formatting the card, ASC MHL directory hashes / rename / flatten / collections (not yet), P2 / Canon XF / RED structures (listed as generic files).

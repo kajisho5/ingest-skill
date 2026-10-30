@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional
 from . import __version__
 from .contract import ERRORS, contract
 from .core import NAME_BY, IngestError, doctor, inventory, offload, verify
+from .fetch import fetch
 from .hashing import DEFAULT_HASH, OFFLOAD_HASHES
 
 
@@ -59,6 +60,15 @@ def main(argv: Optional[List[str]] = None) -> int:
                         "(--reel, else the camera ID + reel number of its clip names, else CARD-<fingerprint>)")
     p.add_argument("--reel", help="the card's reel / card id, overriding what the card says (letters, digits, . _ -)")
     p.add_argument("--json", action="store_true")
+    p = sub.add_parser("fetch", help="download one video URL with yt-dlp (optional extra), then offload it like a card, verified")
+    p.add_argument("url", help="the URL of one video; you must have the right to download it")
+    p.add_argument("--dest", action="append", default=[], required=True, help="destination root; repeat for a second copy on another drive")
+    p.add_argument("--project", help="sub-folder under each destination (e.g. the event name)")
+    p.add_argument("--name", help="the folder of this download in each destination (default <extractor>-<video id>)")
+    p.add_argument("--hash", choices=OFFLOAD_HASHES, default=DEFAULT_HASH, help="checksum for the read-back and ingest-manifest.json, as for offload")
+    p.add_argument("--format", dest="format_selector", help="yt-dlp format selector (default bestvideo*+bestaudio/best, or best without ffmpeg)")
+    p.add_argument("--staging", help="folder to download into before the verified copy (default: the system temporary folder)")
+    p.add_argument("--json", action="store_true")
     p = sub.add_parser("verify", help="re-hash an offloaded folder against its manifest (sha256 or xxh64) and its ASC MHL history")
     p.add_argument("target")
     p.add_argument("--json", action="store_true")
@@ -78,6 +88,14 @@ def main(argv: Optional[List[str]] = None) -> int:
         if a.cmd == "offload":
             d = offload(a.source, a.dest, project=a.project, dry_run=a.dry_run, hash_algorithm=a.hash, name_by=a.name_by, reel=a.reel).to_dict()
             _emit(d, a.json, _offload_summary(d))
+            return 0 if d["ok"] else ERRORS["INCOMPLETE"]["exit_code"]
+        if a.cmd == "fetch":
+            d = fetch(a.url, a.dest, project=a.project, name=a.name, hash_algorithm=a.hash, format_selector=a.format_selector, staging=a.staging)
+            f = d["fetch"]
+            summary = (f"fetched {f['source_url']} ({f['extractor']}, format {f['format_id']}, yt-dlp {f['downloader']['version']})\n"
+                       + _offload_summary(d) + f"\n  staging {d['staging']['path']}: {d['staging']['detail']}"
+                       + "".join(f"\n  warning: {w}" for w in d["warnings"]))
+            _emit(d, a.json, summary)
             return 0 if d["ok"] else ERRORS["INCOMPLETE"]["exit_code"]
         if a.cmd == "verify":
             d = verify(a.target)
