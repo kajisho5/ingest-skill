@@ -1,4 +1,18 @@
-# ingest-skill
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="brand/app-icon-dark.png">
+    <img src="brand/app-icon.png" width="128" alt="ingest-skill app icon">
+  </picture>
+</p>
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="brand/logo/ingest-skill-wordmark-white.svg">
+    <img src="brand/logo/ingest-skill-wordmark-black.svg" height="48" alt="ingest-skill">
+  </picture>
+</p>
+
+<p align="center"><b>Verified media offload from cards and recorders</b></p>
 
 Verified media offload for camera cards and recorders: every copy is checked by a sha256 read-back, nothing is ever overwritten, an interrupted offload resumes, and a backup can be re-verified at any time. Part of the [AI Video Production OS](https://github.com/kajisho5/AI-video-production-OS) ecosystem (Ingest department), and usable on its own.
 
