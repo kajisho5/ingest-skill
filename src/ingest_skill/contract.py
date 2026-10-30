@@ -11,7 +11,7 @@ CONTRACT_VERSION = "1.0"
 
 TOOLS = [
     {"tool_id": "ingest/offload", "role": "execution", "writes_media": True, "mutates_input": False, "deterministic": True,
-     "description": "Copy every file of a card or recorder folder to one or more destinations, verified by a sha256 (default) or xxh64 read-back; writes ingest-manifest.json and an ASC MHL history generation (ascmhl/) in each",
+     "description": "Copy every file of a card or recorder folder to one or more destinations (the source is read once per file, written to every destination in parallel), verified by a sha256 (default) or xxh64 read-back of each; writes ingest-manifest.json and an ASC MHL history generation (ascmhl/) in each",
      "argv": ["offload", "<source>", "--dest", "<dir>", "[--dest <dir> ...]", "[--project <name>]", "[--hash sha256|xxh64]", "[--name-by folder|reel]", "[--reel <id>]", "[--dry-run]", "--json"]},
     {"tool_id": "ingest/verify", "role": "measurement", "writes_media": False, "mutates_input": False, "deterministic": True,
      "description": "Re-hash an offloaded folder against its manifest (sha256 or xxh64) and its ASC MHL history: missing, changed and unlisted files; writes nothing",

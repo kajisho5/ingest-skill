@@ -21,6 +21,7 @@ Run `ingest <command> ... --json` (installed by `pip install -e .`). Every comma
 
 - The source card is only read. It is never modified, deleted or formatted.
 - Each copy is written to a temporary name, flushed to disk, renamed, then read back; it counts as copied only when the read-back sha256 equals the hash taken while reading the source.
+- The card is read once per file, however many destinations: the same bytes are hashed and written to every drive in parallel, then each drive is read back on its own. If one drive fails (full, unplugged), only that drive's copy of the file fails; the other drives are still complete and verified.
 - An existing file at the destination is never overwritten: identical content is skipped (so a re-run resumes an interrupted offload), different content is a **conflict** and the run is incomplete (exit 3).
 - Each destination gets `ingest-manifest.json` (path, size, sha256 or xxh64, mtime of every file) and an ASC MHL history in `ascmhl/`: one new `.mhl` generation per run (process `transfer`; c4 with sha256, xxh64 with xxh64) and `ascmhl_chain.xml`. A source folder's own `ascmhl/` history is carried into each copy and continued.
 - `verify` re-hashes against the manifest and the ASC MHL history (sha256, xxh64, c4, md5, sha1; xxh3 / xxh128 with the extra) and reports missing, changed and unlisted files; each entry of `failures` has a `code`, the `hash`, the `expected` and the `actual` value. It writes nothing.
@@ -33,6 +34,7 @@ Exit codes: `0` ok, `2` refused (including `HASH_UNAVAILABLE`: xxh64 without the
 ## Report it honestly
 
 - Say "verified" only when `ok` is true. If `ok` is false, name the conflicts / failures from the JSON; do not call the backup done.
+- When one destination has `failed` files, name that drive: the other destinations are complete. Its `ingest-manifest.json` lists the files under `failed` and its `verify` is not ok (`copy_failed`); re-run the same offload after fixing the drive to complete it (only the missing files are written).
 - `mhl_failed` or an `action="failed"` record means a file differs from what its ASC MHL history recorded earlier: report it as damage, not as a new version.
 - If xxh64 is `unavailable` in `doctor`, say so and offer sha256 (the default) or installing the extra; do not fall back silently.
 - `inventory` lists recordings, not files: a `spanned` clip's `members` are one recording in order; an `incomplete` one continues on another card. Report the clip count from `clip_count`, and the reel with its `source` (`operator`, `manifest`, `clip_names`, `fingerprint`); a `fingerprint` reel is not a camera reel.

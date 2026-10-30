@@ -2,6 +2,8 @@
 
 Guarantees:
 - The source is only ever read.
+- The source is read once per file, whatever the number of destinations: each chunk is hashed and handed to one
+  writer thread per destination (ADR-004). A write error ends only that destination's copy of the file.
 - A destination file is written to a temporary name, fsynced, renamed, then read back and hashed; it counts as
   copied only when that hash equals the hash taken while reading the source.
 - An existing destination file is never overwritten: identical content is skipped (resume), different content is
@@ -16,12 +18,15 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import queue
 import shutil
 import subprocess
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple, Union
 
 from . import __version__, cards, mhl
 from .errors import IngestError
@@ -131,31 +136,203 @@ def scan(source: Path) -> Tuple[List[Path], List[FileRecord]]:
     return files, skipped
 
 
-def _copy_verified(src: Path, dst: Path, algorithms: Iterable[str] = ("sha256",)) -> Dict[str, str]:
-    """Copy src to dst through a temporary name, hashing what was read; then read dst back and compare every digest.
-    Returns the source digests. Raises IngestError on any mismatch; never leaves a partial file at dst."""
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    tmp = dst.with_name(f".{dst.name}.ingest-{os.getpid()}.part")
+# Chunks a destination may lag behind the source read before the read waits for it (ADR-004). The chunks are shared,
+# not copied, so at most about (QUEUE_DEPTH + 2) x CHUNK bytes are held, whatever the number of destinations.
+QUEUE_DEPTH = 4
+_END, _ABORT = object(), object()
+
+
+class _Writer(threading.Thread):
+    """One destination of a fan-out copy: writes the chunks it is given to a temporary name, then fsyncs and renames.
+    A write error ends this destination only: it keeps taking chunks (so the source read never waits on it), removes
+    its temporary file and keeps the error. Nothing is left at dst unless every chunk was written and synced."""
+
+    def __init__(self, src: Path, dst: Path):
+        super().__init__(name=f"ingest-write {dst}", daemon=True)
+        self.src, self.dst = src, dst
+        self.tmp = dst.with_name(f".{dst.name}.ingest-{os.getpid()}.part")
+        self.chunks: "queue.Queue" = queue.Queue(maxsize=QUEUE_DEPTH)
+        self.error: Optional[BaseException] = None
+
+    def run(self) -> None:
+        fo = None
+        item = None
+        try:
+            try:
+                self.dst.parent.mkdir(parents=True, exist_ok=True)
+                fo = open(self.tmp, "wb")
+            except OSError as e:
+                self.error = e
+            while True:
+                item = self.chunks.get()
+                if item is _END or item is _ABORT:
+                    break
+                if self.error is None:
+                    try:
+                        fo.write(item)
+                    except OSError as e:
+                        self.error = e
+            if self.error is None and item is _ABORT:
+                self.error = IngestError("INCOMPLETE", f"{self.dst}: not written, the source read did not complete")
+            if self.error is None:
+                fo.flush()
+                os.fsync(fo.fileno())
+                fo.close()
+                fo = None
+                shutil.copystat(self.src, self.tmp)
+                os.replace(self.tmp, self.dst)
+        except Exception as e:  # noqa: BLE001 - any failure is this destination's failure, never the others'
+            self.error = self.error or e
+        finally:
+            if fo is not None:
+                try:
+                    fo.close()
+                except OSError:
+                    pass
+            try:
+                if self.tmp.exists():
+                    self.tmp.unlink()
+            except OSError:
+                pass
+
+
+def _give(w: _Writer, item: object) -> None:
+    """Hand one item to a writer, waiting while its queue is full (backpressure), but never on a writer that died."""
+    while True:
+        try:
+            w.chunks.put(item, timeout=1.0)
+            return
+        except queue.Full:
+            if not w.is_alive():
+                return
+
+
+def _fan_out(src: Path, dsts: Sequence[Path], algorithms: Iterable[str]) -> Tuple[Union[Dict[str, str], BaseException], List[Optional[BaseException]]]:
+    """Read src ONCE, hashing every chunk and handing it to one writer per destination (temporary name, fsync, rename).
+    With no destination this is a plain hash of src. Returns the source digests (or the error that stopped the read)
+    and, per destination, None when the file was written and renamed into place, else the error. No read-back here.
+
+    The source is opened once and read once. If it is not read to the end, or its size or modification time changed
+    while it was read (SOURCE_CHANGED), no destination keeps the file."""
+    writers = [_Writer(src, d) for d in dsts]
+    for w in writers:
+        w.start()
     h = MultiHash(algorithms)
+    result: Union[Dict[str, str], BaseException]
+    end = _ABORT
     try:
-        with open(src, "rb") as fi, open(tmp, "wb") as fo:
+        before = os.stat(src)
+        read = 0
+        with open(src, "rb") as fi:
             for chunk in iter(lambda: fi.read(CHUNK), b""):
+                for w in writers:
+                    if w.error is None:   # a failed destination is skipped; it drains whatever it was already given
+                        _give(w, chunk)
                 h.update(chunk)
-                fo.write(chunk)
-            fo.flush()
-            os.fsync(fo.fileno())
-        shutil.copystat(src, tmp)
-        os.replace(tmp, dst)
+                read += len(chunk)
+        after = os.stat(src)
+        if read != before.st_size or (after.st_size, after.st_mtime_ns) != (before.st_size, before.st_mtime_ns):
+            result = IngestError("SOURCE_CHANGED", f"{src} changed while it was being copied")
+        else:
+            result = h.digests()
+            end = _END
+    except Exception as e:  # noqa: BLE001 - the source could not be read: every destination of this file fails
+        result = e
     finally:
-        if tmp.exists():
-            tmp.unlink()
-    digests = h.digests()
+        for w in writers:
+            _give(w, end)   # always delivered: a writer keeps taking chunks until it sees the end
+        for w in writers:
+            w.join()
+    errors: List[Optional[BaseException]] = [w.error if end is _END else (w.error or result) for w in writers]
+    return result, errors
+
+
+def _hash_each(paths: Sequence[Path], algorithms: Iterable[str]) -> List[Union[Dict[str, str], BaseException]]:
+    """hash_file of every path, one thread per path (destinations are usually separate drives): the read-backs."""
+    algorithms = list(algorithms)
+
+    def one(p: Path) -> Union[Dict[str, str], BaseException]:
+        try:
+            return hash_file(p, algorithms)
+        except Exception as e:  # noqa: BLE001
+            return e
+
+    if len(paths) <= 1:
+        return [one(p) for p in paths]
+    with ThreadPoolExecutor(max_workers=len(paths), thread_name_prefix="ingest-readback") as pool:
+        return list(pool.map(one, paths))
+
+
+def _mismatch(dst: Path, back: Dict[str, str], digests: Dict[str, str]) -> IngestError:
+    bad = ", ".join(f"{a} {back[a]} != {digests[a]}" for a in sorted(digests) if back[a] != digests[a])
+    return IngestError("VERIFY_MISMATCH", f"{dst}: read-back {bad} (source)")
+
+
+def _copy_verified(src: Path, dst: Path, algorithms: Iterable[str] = ("sha256",)) -> Dict[str, str]:
+    """Copy src to one dst through a temporary name, hashing what was read; then read dst back and compare every
+    digest. Returns the source digests. Raises on any failure or mismatch; never leaves a partial file at dst."""
+    algorithms = list(algorithms)
+    digests, (err,) = _fan_out(src, [dst], algorithms)
+    if isinstance(digests, BaseException):
+        raise digests
+    if err is not None:
+        raise err
     back = hash_file(dst, algorithms)
     if back != digests:
         dst.unlink()
-        bad = ", ".join(f"{a} {back[a]} != {digests[a]}" for a in sorted(digests) if back[a] != digests[a])
-        raise IngestError("VERIFY_MISMATCH", f"{dst}: read-back {bad} (source)")
+        raise _mismatch(dst, back, digests)
     return digests
+
+
+def _offload_file(src: Path, size: int, dsts: Sequence[Path], algorithms: Iterable[str]) -> Tuple[Optional[Dict[str, str]], List[Tuple[str, str]]]:
+    """One source file to every destination: one read of the source (written to every destination that does not have
+    the file yet), then a read-back of every destination, in parallel. Returns the source digests (None when the source
+    could not be read) and, per destination, (status, detail): copied, skipped_identical, conflict or failed."""
+    algorithms = list(algorithms)
+    existing = [d.exists() for d in dsts]
+    to_write = [d for d, e in zip(dsts, existing) if not e]
+    digests, write_errors = _fan_out(src, to_write, algorithms)
+    results: List[Optional[Tuple[str, str]]] = [None] * len(dsts)
+    readback: List[int] = []
+    werr = iter(write_errors)
+    for i, (d, e) in enumerate(zip(dsts, existing)):
+        if isinstance(digests, BaseException):
+            results[i] = ("failed", str(digests))
+            if not e:
+                next(werr)
+        elif e:
+            try:
+                same_size = d.stat().st_size == size
+            except OSError as exc:
+                results[i] = ("failed", str(exc))
+                continue
+            if same_size:
+                readback.append(i)
+            else:
+                results[i] = ("conflict", f"{d} exists with different content; not overwritten")
+        else:
+            err = next(werr)
+            if err is not None:
+                results[i] = ("failed", str(err) if str(err).startswith(str(d)) else f"{d}: {err}")
+            else:
+                readback.append(i)
+    if isinstance(digests, BaseException):
+        return None, [r for r in results if r is not None]
+    for i, back in zip(readback, _hash_each([dsts[i] for i in readback], algorithms)):
+        d = dsts[i]
+        if isinstance(back, BaseException):
+            results[i] = ("failed", str(back))
+        elif existing[i]:
+            results[i] = ("skipped_identical", "") if back == digests else ("conflict", f"{d} exists with different content; not overwritten")
+        elif back == digests:
+            results[i] = ("copied", "")
+        else:
+            try:
+                d.unlink()
+            except OSError:
+                pass
+            results[i] = ("failed", str(_mismatch(d, back, digests)))
+    return digests, [r for r in results if r is not None]
 
 
 def _carry_history(src_hist: "mhl.History", root: Path) -> List[Dict[str, str]]:
@@ -240,6 +417,8 @@ def offload(source: str, destinations: Iterable[str], project: Optional[str] = N
                            dry_run=dry_run, started_at=started.strftime("%Y-%m-%dT%H:%M:%SZ"), card={"reel": reel_info, "name_by": name_by})
     mhl_format = MHL_FORMAT_FOR[hash_algorithm]
     histories: List[mhl.History] = []
+    # Per destination: path -> (status, detail). A file failed on one destination is still listed by the others (ADR-004).
+    per_dest: List[Dict[str, Tuple[str, str]]] = [{} for _ in roots]
     if not dry_run:
         src_hist = mhl.read_history(src)
         for dres, root in zip(report.destinations, roots):
@@ -258,53 +437,50 @@ def offload(source: str, destinations: Iterable[str], project: Optional[str] = N
             continue
         # The offload hash, the ASC MHL format, and every earlier ASC MHL format for this file that can be computed here.
         algorithms = {hash_algorithm, mhl_format} | {fmt for h in histories for fmt, _, _ in h.prior(rec.path) if available(fmt)}
-        src_digests: Optional[Dict[str, str]] = None
+        src_digests, outcome = _offload_file(f, st.st_size, [root / rel for root in roots], algorithms)
         statuses = []
-        for dres, root in zip(report.destinations, roots):
-            dst = root / rel
-            try:
-                if dst.exists():
-                    src_digests = src_digests or hash_file(f, algorithms)
-                    if dst.stat().st_size == st.st_size and hash_file(dst, algorithms) == src_digests:
-                        dres.skipped_identical += 1
-                        statuses.append("skipped_identical")
-                    else:
-                        dres.conflicts += 1
-                        statuses.append("conflict")
-                        rec.detail = f"{dst} exists with different content; not overwritten"
-                    continue
-                digests = _copy_verified(f, dst, algorithms)
-                if src_digests is not None and digests != src_digests:
-                    raise IngestError("SOURCE_CHANGED", f"{f} changed while it was being copied")
-                src_digests = digests
+        for dres, seen, (status, detail) in zip(report.destinations, per_dest, outcome):
+            seen[rec.path] = (status, detail)
+            statuses.append(status)
+            if status == "copied":
                 dres.copied += 1
-                statuses.append("copied")
-            except (OSError, IngestError) as e:
+            elif status == "skipped_identical":
+                dres.skipped_identical += 1
+            elif status == "conflict":
+                dres.conflicts += 1
+            else:
                 dres.failed += 1
-                statuses.append("failed")
-                rec.detail = str(e)
+            if detail:
+                rec.detail = detail
         rec.hashes = src_digests or {}
         rec.sha256 = rec.hashes.get("sha256")
         rec.status = "failed" if "failed" in statuses else "conflict" if "conflict" in statuses else "copied" if "copied" in statuses else "skipped_identical"
         report.files.append(rec)
     if not dry_run:
-        for dres, root, hist in zip(report.destinations, roots, histories):
-            dres.manifest = str(write_manifest(root, report))
-            _write_mhl(dres, hist, report, started)
+        for dres, root, hist, seen in zip(report.destinations, roots, histories, per_dest):
+            dres.manifest = str(write_manifest(root, report, seen))
+            _write_mhl(dres, hist, report, started, seen)
     report.ok = all(d.failed == 0 and d.conflicts == 0 and d.mhl_failed == 0 and not d.problems for d in report.destinations)
     report.finished_at = _now()
     return report
 
 
-def _write_mhl(dres: DestResult, hist: "mhl.History", report: OffloadReport, started: datetime) -> None:
-    """Append this run's ASC MHL generation to one destination's history (process "transfer")."""
+def _dest_status(f: FileRecord, statuses: Optional[Dict[str, Tuple[str, str]]]) -> str:
+    """The status of f on one destination; without per-destination statuses, the file's overall status."""
+    return statuses[f.path][0] if statuses is not None and f.path in statuses else f.status
+
+
+def _write_mhl(dres: DestResult, hist: "mhl.History", report: OffloadReport, started: datetime,
+               statuses: Optional[Dict[str, Tuple[str, str]]] = None) -> None:
+    """Append this run's ASC MHL generation to one destination's history (process "transfer"): the files this
+    destination has, copied or found identical, and verified. A file that failed here is not in it (ADR-004)."""
     if hist.problems:
         dres.warnings.append("no ASC MHL generation written: the destination's ASC MHL history has problems")
         return
     mhl_format = MHL_FORMAT_FOR[report.hash]
     items = []
     for f in report.files:
-        if f.status not in ("copied", "skipped_identical") or report.hash not in f.hashes:
+        if _dest_status(f, statuses) not in ("copied", "skipped_identical") or report.hash not in f.hashes:
             continue
         action, unchecked = _mhl_actions(hist, f.path, f.hashes)
         if action == "failed":
@@ -324,10 +500,17 @@ def _write_mhl(dres: DestResult, hist: "mhl.History", report: OffloadReport, sta
         dres.problems.append({"code": "MHL_INVALID", "detail": f"writing the ASC MHL generation failed: {e}"})
 
 
-def write_manifest(root: Path, report: OffloadReport) -> Path:
+def write_manifest(root: Path, report: OffloadReport, statuses: Optional[Dict[str, Tuple[str, str]]] = None) -> Path:
+    """ingest-manifest.json of one destination: every file it has, verified. With this destination's statuses, the
+    files whose copy failed here are listed under the optional "failed" key, so `verify` reports the copy incomplete."""
     algo = report.hash
-    entries = [{"path": f.path, "size": f.size, algo: f.hashes[algo], "mtime": f.mtime} for f in report.files if algo in f.hashes and f.status in ("copied", "skipped_identical")]
+    entries = [{"path": f.path, "size": f.size, algo: f.hashes[algo], "mtime": f.mtime} for f in report.files
+               if algo in f.hashes and _dest_status(f, statuses) in ("copied", "skipped_identical")]
     doc = {"schema": MANIFEST_SCHEMA, "tool": f"ingest-skill {__version__}", "source": report.source, "created_at": _now(), "hash": algo, "files": entries}
+    failed = [{"path": f.path, "size": f.size, "detail": statuses[f.path][1]} for f in report.files
+              if statuses is not None and statuses.get(f.path, ("", ""))[0] == "failed"]
+    if failed:  # optional, like "card": readers of ingest/manifest@1 that do not know it ignore it
+        doc["failed"] = failed
     if report.card.get("reel"):  # optional: the reel this copy was made under, so inventory keeps an operator-given one
         doc["card"] = {"reel": report.card["reel"]["id"], "reel_source": report.card["reel"]["source"]}
     path = root / MANIFEST_NAME
@@ -349,6 +532,8 @@ def load_manifest(target: str) -> Tuple[Path, Dict]:
     if not isinstance(doc, dict) or doc.get("schema") != MANIFEST_SCHEMA:
         raise IngestError("MANIFEST_INVALID", f"{path} is not an {MANIFEST_SCHEMA} document")
     doc.setdefault("hash", "sha256")  # every manifest written before xxh64 existed is sha256
+    if not isinstance(doc.get("failed", []), list) or any(not isinstance(e, dict) or "path" not in e for e in doc.get("failed", [])):
+        raise IngestError("MANIFEST_INVALID", f"{path}: \"failed\" must be a list of {{\"path\", ...}} entries")
     if doc["hash"] not in OFFLOAD_HASHES or any(doc["hash"] not in e for e in doc.get("files", [])):
         raise IngestError("MANIFEST_INVALID", f"{path}: hash must be one of {', '.join(OFFLOAD_HASHES)} and every file must carry it")
     return path.parent, doc
@@ -389,7 +574,7 @@ def verify(target: str) -> Dict:
             if doc is None and path not in expected:
                 require([fmt for r in recs for fmt in r.hashes])  # refuse: nothing here can check this file
     out: Dict = {"schema": "ingest/verify-report@1", "root": str(root), "hash": doc["hash"] if doc else None, "checked": 0, "ok_files": 0,
-                 "missing": [], "changed": [], "unlisted": [], "failures": [], "warnings": warnings,
+                 "missing": [], "changed": [], "unlisted": [], "copy_failed": [], "failures": [], "warnings": warnings,
                  "mhl": None if hist is None else {"history": str(hist.folder), "generations": len(hist.entries), "problems": hist.problems, "warnings": hist.warnings}}
     for path in sorted(set(expected) | set(sizes)):
         f = root / path
@@ -412,9 +597,15 @@ def verify(target: str) -> Dict:
     found, _ = scan(root)
     listed = set(expected) | set(sizes)
     out["unlisted"] = sorted(r for r in (f.relative_to(root).as_posix() for f in found) if r not in listed)
+    # Files the offload that wrote the manifest failed to copy here (another destination may have them): incomplete.
+    for e in (doc or {}).get("failed", []):
+        if e["path"] not in listed:
+            out["copy_failed"].append(e["path"])
+            out["failures"].append({"code": "INCOMPLETE", "path": e["path"], "against": MANIFEST_NAME,
+                                    "detail": f"the offload failed to copy this file here: {e.get('detail') or 'no detail recorded'}"})
     if hist is not None:
         out["failures"].extend(hist.problems)
-    out["ok"] = not out["missing"] and not out["changed"] and not (hist and hist.problems)
+    out["ok"] = not out["missing"] and not out["changed"] and not out["copy_failed"] and not (hist and hist.problems)
     return out
 
 
