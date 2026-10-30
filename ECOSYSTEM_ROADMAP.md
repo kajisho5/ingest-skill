@@ -32,7 +32,7 @@ No adapter in the agent. Calls ffprobe directly; proxies stay with ffmpeg-skill 
   - Done when: MHL round-trips; verify passes on both hash kinds
 - [x] **4. Card-structure-aware inventory** — group spanned clips (XDCAM/AVCHD/BRAW/etc.), read camera sidecars, reel/card naming ([#7](https://github.com/kajisho5/ingest-skill/pull/7))
   - Done when: fixture card trees give one clip per recording
-- [ ] **5. Read the source once for all destinations** — single read, fan-out writes
+- [x] **5. Read the source once for all destinations** — single read, fan-out writes ([#8](https://github.com/kajisho5/ingest-skill/pull/8), ADR-004)
   - Done when: a test counts one read per file
 - [ ] **6. Agent adapter + SkillSpec media_offload** — inventory becomes OBSERVED observations on new assets
   - Done when: `video-agent plan <card>` offloads then analyses, with provenance
