@@ -24,7 +24,7 @@ No adapter in the agent. Calls ffprobe directly; proxies stay with ffmpeg-skill 
 
 ## Steps
 
-- [ ] **1. Contract fits the OS schema** — `skill` as an object (or drop it), ffprobe under capabilities.optional, SOURCE_CHANGED in ERRORS, a jsonschema test against the OS schema
+- [x] **1. Contract fits the OS schema** — `skill` as an object (or drop it), ffprobe under capabilities.optional, SOURCE_CHANGED in ERRORS, a jsonschema test against the OS schema
   - Done when: contract validates against registry/capability_contract.schema.json in CI
 - [ ] **2. Merge to main; CI on Python 3.9 / 3.11 / 3.12**
   - Done when: CI green; SKILL.md on the default branch (marketplace install shows 1 skill)

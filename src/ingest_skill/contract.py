@@ -29,6 +29,9 @@ ERRORS = {
     "MANIFEST_NOT_FOUND": {"exit_code": 2, "retryable": False},
     "MANIFEST_INVALID": {"exit_code": 2, "retryable": False},
     "INCOMPLETE": {"exit_code": 3, "retryable": True},
+    # Per-file failures: recorded in that file's `detail`, and the run ends INCOMPLETE.
+    "SOURCE_CHANGED": {"exit_code": 3, "retryable": True},
+    "VERIFY_MISMATCH": {"exit_code": 3, "retryable": True},
 }
 
 
@@ -36,13 +39,16 @@ def contract() -> Dict[str, Any]:
     return {
         "skill_id": SKILL_ID,
         "id": SKILL_ID,
-        "skill": "ingest-skill",
+        "skill": {"id": SKILL_ID, "package": "ingest-skill", "version": __version__},
         "version": __version__,
         "contract_version": CONTRACT_VERSION,
         "provides": [{"id": "ingest.offload", "lifecycle": "EXPERIMENTAL", "tool_id": "ingest/offload"},
                      {"id": "ingest.verify", "lifecycle": "EXPERIMENTAL", "tool_id": "ingest/verify"},
                      {"id": "ingest.inventory", "lifecycle": "EXPERIMENTAL", "tool_id": "ingest/inventory"}],
-        "dependencies": [{"id": "ffprobe", "kind": "binary", "required": False, "used_by": ["ingest/inventory"]}],
+        # No Skill dependencies (ffmpeg-skill is not used); ffprobe is an optional binary, not a Skill.
+        "dependencies": [],
+        "capabilities": {"optional": [{"id": "ffprobe", "kind": "binary", "used_by": ["ingest/inventory"],
+                                       "without_it": "inventory facts are unknown; offload and verify do not need it"}]},
         "not_provided": ["editing or transcoding (video-editing-skill / ffmpeg-skill)", "proxy generation (ffmpeg-skill proxy)",
                          "cloud upload (publish-skill)", "deleting or formatting the source card", "MHL / ASC MHL output (not yet)",
                          "xxHash (sha256 only)", "network access of any kind"],
