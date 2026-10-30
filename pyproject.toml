@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "ingest-skill"
 version = "0.1.0"
-description = "Verified media offload from camera cards and recorders: sha256 (or xxh64) read-back on every copy, dual backup, manifest, ASC MHL history and clip inventory. Local, no network."
+description = "Verified media offload from camera cards and recorders: sha256 (or xxh64) read-back on every copy, dual backup, manifest, ASC MHL history and clip inventory. Local; optional URL fetch through yt-dlp."
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.9"
@@ -16,6 +16,8 @@ dependencies = []
 [project.optional-dependencies]
 # xxh64 offloads (--hash xxh64) and checking xxh3 / xxh128 ASC MHL records. Without it those are UNAVAILABLE.
 xxhash = ["xxhash>=3.0"]
+# `ingest fetch <url>`: yt-dlp, used as a library (ADR-005). Without it fetch is UNAVAILABLE; nothing else needs it.
+fetch = ["yt-dlp>=2024.8.6"]
 
 [project.scripts]
 ingest = "ingest_skill.cli:main"

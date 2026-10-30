@@ -347,8 +347,11 @@ class InventoryAndContractTests(unittest.TestCase):
         c = contract()
         for k in ("skill_id", "id", "skill", "version", "contract_version", "provides", "dependencies", "not_provided"):
             self.assertIn(k, c)
-        self.assertEqual({p["id"] for p in c["provides"]}, {"ingest.offload", "ingest.verify", "ingest.inventory"})
-        self.assertFalse(c["execution"]["network"])
+        self.assertEqual({p["id"] for p in c["provides"]}, {"ingest.offload", "ingest.verify", "ingest.inventory", "ingest.fetch"})
+        # Only fetch touches the network (ADR-005); offload, verify and inventory stay local.
+        self.assertEqual(c["execution"]["network_tools"], ["ingest/fetch"])
+        self.assertEqual({t["tool_id"]: t["network"] for t in c["tools"]},
+                         {"ingest/offload": False, "ingest/verify": False, "ingest/inventory": False, "ingest/fetch": True})
         code, out = run_cli("contract")
         self.assertEqual(json.loads(out)["version"], c["version"])
 
@@ -364,8 +367,8 @@ class InventoryAndContractTests(unittest.TestCase):
         self.assertEqual(len({p["id"] for p in c["provides"]}), len(c["provides"]))
         for d in c["dependencies"]:
             self.assertTrue(d.get("skill_id") and d.get("version_range"), d)
-        self.assertEqual([o["id"] for o in c["capabilities"]["optional"]], ["ffprobe", "xxhash"])
-        for code in ("SOURCE_CHANGED", "VERIFY_MISMATCH", "HASH_UNAVAILABLE", "FILE_MISSING", "MHL_INVALID"):
+        self.assertEqual([o["id"] for o in c["capabilities"]["optional"]], ["ffprobe", "xxhash", "yt-dlp"])
+        for code in ("SOURCE_CHANGED", "VERIFY_MISMATCH", "HASH_UNAVAILABLE", "FILE_MISSING", "MHL_INVALID", "FETCH_UNAVAILABLE", "FETCH_FAILED", "URL_INVALID"):
             self.assertIn(code, c["errors"])
 
     def test_contract_validates_against_the_os_json_schema(self):

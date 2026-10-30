@@ -12,6 +12,8 @@ Guarantees:
 - Every destination gets ingest-manifest.json (sha256 or xxh64) and an ASC MHL history (ascmhl/), see mhl.py.
 - The card structure (cards.py) is reporting only: it names the reel and groups the inventory, it never decides
   which file is copied or what it is called inside the card folder.
+- `ingest fetch` (fetch.py) downloads a URL into a staging folder and offloads that folder through this same path; its
+  download record is carried as the optional "fetch" key of the report, the manifest and the inventory (ADR-005).
 """
 from __future__ import annotations
 
@@ -78,12 +80,16 @@ class OffloadReport:
     started_at: str = ""
     finished_at: str = ""
     card: Dict = field(default_factory=dict)   # {"reel": {...}, "name_by": "folder" | "reel"}
+    fetch: Optional[Dict] = None               # the download record when the source is an `ingest fetch` staging folder (ADR-005)
 
     def to_dict(self) -> Dict:
-        return {"schema": "ingest/offload-report@1", "ok": self.ok, "dry_run": self.dry_run, "source": self.source, "hash": self.hash, "bytes_total": self.bytes_total,
-                "card": self.card,
-                "destinations": [asdict(d) for d in self.destinations], "files": [asdict(f) for f in self.files],
-                "skipped": [asdict(f) for f in self.skipped], "started_at": self.started_at, "finished_at": self.finished_at}
+        doc = {"schema": "ingest/offload-report@1", "ok": self.ok, "dry_run": self.dry_run, "source": self.source, "hash": self.hash, "bytes_total": self.bytes_total,
+               "card": self.card,
+               "destinations": [asdict(d) for d in self.destinations], "files": [asdict(f) for f in self.files],
+               "skipped": [asdict(f) for f in self.skipped], "started_at": self.started_at, "finished_at": self.finished_at}
+        if self.fetch is not None:
+            doc["fetch"] = self.fetch
+        return doc
 
 
 def _now() -> str:
@@ -386,17 +392,9 @@ def card_reel(src: Path, files: List[Path], reel: Optional[str] = None, recorded
     return cards.derive_reel(analysis.clips, [(r, f.stat().st_size) for r, f in zip(rels, files)], operator=reel, recorded=recorded)
 
 
-def offload(source: str, destinations: Iterable[str], project: Optional[str] = None, dry_run: bool = False, hash_algorithm: str = DEFAULT_HASH,
-            name_by: str = "folder", reel: Optional[str] = None) -> OffloadReport:
-    """Copy the card folder to each destination as <dest>/<project>/<name>, where name is the source folder's name
-    (name_by="folder", the default) or its reel / card id (name_by="reel", see cards.derive_reel). Every file of the
-    folder is copied unchanged, whatever its card structure."""
-    src = Path(source).resolve()
-    if not src.is_dir():
-        raise IngestError("SOURCE_NOT_FOUND", f"source {source} is not a directory")
-    if name_by not in NAME_BY:
-        raise IngestError("REEL_INVALID", f"name_by must be one of {', '.join(NAME_BY)}")
-    check_reel(reel)
+def check_destinations(destinations: Iterable[str], hash_algorithm: str, src: Optional[Path] = None) -> List[Path]:
+    """The refusals every offload makes before anything is written: an unknown or unavailable hash, no destination, the
+    same destination twice, and (with src) a destination and the source inside one another. Returns the resolved roots."""
     if hash_algorithm not in OFFLOAD_HASHES:
         raise IngestError("HASH_UNAVAILABLE", f"unknown hash {hash_algorithm!r}; offload accepts {', '.join(OFFLOAD_HASHES)}")
     require([hash_algorithm, MHL_FORMAT_FOR[hash_algorithm]])
@@ -406,15 +404,31 @@ def offload(source: str, destinations: Iterable[str], project: Optional[str] = N
     if len(set(dests)) != len(dests):
         raise IngestError("DUPLICATE_DESTINATION", "the same destination was given twice; a second copy must be on a different path (ideally a different drive)")
     for d in dests:
-        if _inside(d, src) or _inside(src, d):
+        if src is not None and (_inside(d, src) or _inside(src, d)):
             raise IngestError("DESTINATION_OVERLAPS_SOURCE", f"{d} and the source {src} contain one another")
+    return dests
+
+
+def offload(source: str, destinations: Iterable[str], project: Optional[str] = None, dry_run: bool = False, hash_algorithm: str = DEFAULT_HASH,
+            name_by: str = "folder", reel: Optional[str] = None, fetch: Optional[Dict] = None) -> OffloadReport:
+    """Copy the card folder to each destination as <dest>/<project>/<name>, where name is the source folder's name
+    (name_by="folder", the default) or its reel / card id (name_by="reel", see cards.derive_reel). Every file of the
+    folder is copied unchanged, whatever its card structure. `fetch` is the download record of an `ingest fetch`
+    staging folder (fetch.py): it is written as the "fetch" key of every destination's manifest."""
+    src = Path(source).resolve()
+    if not src.is_dir():
+        raise IngestError("SOURCE_NOT_FOUND", f"source {source} is not a directory")
+    if name_by not in NAME_BY:
+        raise IngestError("REEL_INVALID", f"name_by must be one of {', '.join(NAME_BY)}")
+    check_reel(reel)
+    dests = check_destinations(destinations, hash_algorithm, src)
     files, skipped = scan(src)
     reel_info, reel_warnings = card_reel(src, files, reel)
     name = reel_info["id"] if name_by == "reel" else src.name
     roots = [d / project / name if project else d / name for d in dests]
     started = datetime.now(timezone.utc)
     report = OffloadReport(source=str(src), destinations=[DestResult(root=str(r), warnings=list(reel_warnings)) for r in roots], skipped=skipped, hash=hash_algorithm,
-                           dry_run=dry_run, started_at=started.strftime("%Y-%m-%dT%H:%M:%SZ"), card={"reel": reel_info, "name_by": name_by})
+                           dry_run=dry_run, started_at=started.strftime("%Y-%m-%dT%H:%M:%SZ"), card={"reel": reel_info, "name_by": name_by}, fetch=fetch)
     mhl_format = MHL_FORMAT_FOR[hash_algorithm]
     histories: List[mhl.History] = []
     # Per destination: path -> (status, detail). A file failed on one destination is still listed by the others (ADR-004).
@@ -513,6 +527,8 @@ def write_manifest(root: Path, report: OffloadReport, statuses: Optional[Dict[st
         doc["failed"] = failed
     if report.card.get("reel"):  # optional: the reel this copy was made under, so inventory keeps an operator-given one
         doc["card"] = {"reel": report.card["reel"]["id"], "reel_source": report.card["reel"]["source"]}
+    if report.fetch is not None:  # optional: where a fetched folder came from (ADR-005); redacted, never a cookie
+        doc["fetch"] = report.fetch
     path = root / MANIFEST_NAME
     tmp = root / (MANIFEST_NAME + ".part")
     tmp.write_text(json.dumps(doc, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -657,11 +673,13 @@ def inventory(target: str, reel: Optional[str] = None) -> Dict:
     hashes: Dict[str, str] = {}
     algo: Optional[str] = None
     recorded: Optional[Dict] = None
+    fetched: Optional[Dict] = None
     if (root / MANIFEST_NAME).is_file():
         _, doc = load_manifest(str(root))
         algo = doc["hash"]
         hashes = {e["path"]: e[algo] for e in doc["files"]}
         recorded = doc.get("card") if isinstance(doc.get("card"), dict) else None
+        fetched = doc.get("fetch") if isinstance(doc.get("fetch"), dict) else None
     files, _ = scan(root)
     rels = [f.relative_to(root).as_posix() for f in files]
     analysis = cards.analyse(root, rels)
@@ -688,12 +706,13 @@ def inventory(target: str, reel: Optional[str] = None) -> Dict:
             "card": {"reel": reel_info, "structures": analysis.structures, "index_files": analysis.index_files},
             "clips": clips, "clip_count": len(clips), "file_count": sum(len(c["members"]) for c in clips),
             "spanned_count": sum(1 for c in clips if c["spanned"]), "total_duration_s": round(total, 3),
-            "warnings": reel_warnings + analysis.warnings,
+            "warnings": reel_warnings + analysis.warnings, "fetch": fetched,
             "probe": "ffprobe" if shutil.which("ffprobe") else "unavailable (facts are unknown, not zero)", "generated_at": _now()}
 
 
 def doctor() -> Dict:
     import sys
+    from .fetch import fetch_check   # here, not at module top: fetch.py imports this module
     ffprobe = shutil.which("ffprobe")
     checks = {"python": {"status": "ok" if sys.version_info >= (3, 9) else "fail", "detail": sys.version.split()[0]},
               "sha256": {"status": "ok" if "sha256" in hashlib.algorithms_available else "fail"},
@@ -701,7 +720,8 @@ def doctor() -> Dict:
               "xxhash": {"status": "ok" if available("xxh64") else "unavailable",
                          "detail": "xxh64 / xxh3 / xxh128 available" if available("xxh64") else
                          f"optional package not installed: --hash xxh64 is UNAVAILABLE (refused, nothing written) and xxh3 / xxh128 ASC MHL records are not checked; {INSTALL_HINT}"},
-              "ffprobe": {"status": "ok" if ffprobe else "degraded", "detail": ffprobe or "not on PATH: inventory facts will be unknown; offload and verify do not need it"}}
+              "ffprobe": {"status": "ok" if ffprobe else "degraded", "detail": ffprobe or "not on PATH: inventory facts will be unknown; offload and verify do not need it"},
+              "yt-dlp": fetch_check()}
     return {"schema": "ingest/doctor@1", "ok": all(c["status"] != "fail" for c in checks.values()), "checks": checks,
             "hash_algorithms": {a: "ok" if available(a) else "unavailable" for a in OFFLOAD_HASHES + ("c4", "md5", "sha1", "xxh3", "xxh128")},
             "version": __version__, "measured_at": _now()}
