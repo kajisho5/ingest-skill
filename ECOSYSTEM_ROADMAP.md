@@ -5,7 +5,7 @@ Written from a read-only audit of this repository on 2026-10-30. Each step below
 
 ## Where it stands
 
-v0.1.0 on the PR branch (main has only the initial commit). Python 3.9+ stdlib. `ingest offload | verify | inventory | contract | doctor`; sha256 read-back, never overwrites, resumable, manifest per destination. 10 tests, CI on 3 OSes (Python 3.12 only).
+v0.1.0 on main, SKILL.md on the default branch. Python 3.9+ stdlib (`xxhash` optional). `ingest offload | verify | inventory | contract | doctor`; sha256 or xxh64 read-back, never overwrites, resumable, manifest and ASC MHL history per destination. 22 tests, CI on 3 OSes × Python 3.9 / 3.11 / 3.12 (3.9 on ubuntu-24.04, see ADR-002).
 
 ## What this repository owns
 
@@ -26,7 +26,7 @@ No adapter in the agent. Calls ffprobe directly; proxies stay with ffmpeg-skill 
 
 - [x] **1. Contract fits the OS schema** — `skill` as an object (or drop it), ffprobe under capabilities.optional, SOURCE_CHANGED in ERRORS, a jsonschema test against the OS schema
   - Done when: contract validates against registry/capability_contract.schema.json in CI
-- [ ] **2. Merge to main; CI on Python 3.9 / 3.11 / 3.12**
+- [x] **2. Merge to main; CI on Python 3.9 / 3.11 / 3.12** ([#6](https://github.com/kajisho5/ingest-skill/pull/6))
   - Done when: CI green; SKILL.md on the default branch (marketplace install shows 1 skill)
 - [x] **3. ASC MHL output + xxHash64** — MHL per destination; `verify` accepts sha256 or xxh64 ([#5](https://github.com/kajisho5/ingest-skill/pull/5))
   - Done when: MHL round-trips; verify passes on both hash kinds

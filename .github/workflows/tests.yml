@@ -13,6 +13,13 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
         # requires-python = ">=3.9" in pyproject.toml: test the floor, and the versions people run.
         python-version: ["3.9", "3.11", "3.12"]
+        # ubuntu-latest (Ubuntu 26.04) has no Python 3.9 build in actions/setup-python: run 3.9 on 24.04. See docs/adr/ADR-002.
+        exclude:
+          - os: ubuntu-latest
+            python-version: "3.9"
+        include:
+          - os: ubuntu-24.04
+            python-version: "3.9"
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
