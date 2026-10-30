@@ -11,7 +11,7 @@ from typing import Any, Dict, List, Optional
 
 from . import __version__
 from .contract import ERRORS, contract
-from .core import IngestError, doctor, inventory, offload, verify
+from .core import NAME_BY, IngestError, doctor, inventory, offload, verify
 from .hashing import DEFAULT_HASH, OFFLOAD_HASHES
 
 
@@ -23,7 +23,8 @@ def _emit(doc: Dict[str, Any], as_json: bool, summary: str) -> None:
 
 
 def _offload_summary(d: Dict[str, Any]) -> str:
-    lines = [f"{'DRY RUN: ' if d['dry_run'] else ''}{len(d['files'])} files, {d['bytes_total'] / 1e9:.2f} GB from {d['source']} ({d['hash']})"]
+    reel = d["card"]["reel"]
+    lines = [f"{'DRY RUN: ' if d['dry_run'] else ''}{len(d['files'])} files, {d['bytes_total'] / 1e9:.2f} GB from {d['source']} ({d['hash']}), reel {reel['id']} ({reel['source']})"]
     for dst in d["destinations"]:
         lines.append(f"  {dst['root']}: copied {dst['copied']}, identical {dst['skipped_identical']}, conflicts {dst['conflicts']}, failed {dst['failed']}")
         if dst["mhl"]:
@@ -53,12 +54,17 @@ def main(argv: Optional[List[str]] = None) -> int:
     p.add_argument("--hash", choices=OFFLOAD_HASHES, default=DEFAULT_HASH,
                    help="checksum for the read-back and ingest-manifest.json (default sha256; xxh64 needs the xxhash extra). "
                         "The ASC MHL records c4 with sha256, xxh64 with xxh64")
+    p.add_argument("--name-by", choices=NAME_BY, default="folder",
+                   help="name of the card folder in each destination: the source folder's name (default) or the card's reel id "
+                        "(--reel, else the camera ID + reel number of its clip names, else CARD-<fingerprint>)")
+    p.add_argument("--reel", help="the card's reel / card id, overriding what the card says (letters, digits, . _ -)")
     p.add_argument("--json", action="store_true")
     p = sub.add_parser("verify", help="re-hash an offloaded folder against its manifest (sha256 or xxh64) and its ASC MHL history")
     p.add_argument("target")
     p.add_argument("--json", action="store_true")
-    p = sub.add_parser("inventory", help="clip list of a folder")
+    p = sub.add_parser("inventory", help="clip list of a card or an offloaded folder: one entry per recording, sidecars, reel")
     p.add_argument("target")
+    p.add_argument("--reel", help="the card's reel / card id, overriding the manifest, the clip names and the fingerprint")
     p.add_argument("--json", action="store_true")
     a = ap.parse_args(argv)
     try:
@@ -70,7 +76,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             _emit(d, a.json, "\n".join(f"{k}: {v['status']} {v.get('detail', '')}" for k, v in d["checks"].items()))
             return 0 if d["ok"] else 3
         if a.cmd == "offload":
-            d = offload(a.source, a.dest, project=a.project, dry_run=a.dry_run, hash_algorithm=a.hash).to_dict()
+            d = offload(a.source, a.dest, project=a.project, dry_run=a.dry_run, hash_algorithm=a.hash, name_by=a.name_by, reel=a.reel).to_dict()
             _emit(d, a.json, _offload_summary(d))
             return 0 if d["ok"] else ERRORS["INCOMPLETE"]["exit_code"]
         if a.cmd == "verify":
@@ -79,8 +85,12 @@ def main(argv: Optional[List[str]] = None) -> int:
             _emit(d, a.json, f"{d['ok_files']}/{d['checked']} verified; missing {len(d['missing'])}, changed {len(d['changed'])}, unlisted {len(d['unlisted'])}{mhl_note}")
             return 0 if d["ok"] else ERRORS["INCOMPLETE"]["exit_code"]
         if a.cmd == "inventory":
-            d = inventory(a.target)
-            _emit(d, a.json, f"{d['clip_count']} clips, {d['total_duration_s']:.1f} s ({d['probe']})")
+            d = inventory(a.target, reel=a.reel)
+            reel = d["card"]["reel"]
+            structures = ", ".join(s["id"] for s in d["card"]["structures"])
+            _emit(d, a.json, f"reel {reel['id']} ({reel['source']}); {structures}; {d['clip_count']} clips from {d['file_count']} files "
+                             f"({d['spanned_count']} spanned), {d['total_duration_s']:.1f} s ({d['probe']})"
+                             + "".join(f"\n  warning: {w}" for w in d["warnings"]))
             return 0
     except IngestError as e:
         doc = {"ok": False, "error": {"code": e.code, "message": str(e)}}

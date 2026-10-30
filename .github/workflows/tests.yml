@@ -23,14 +23,24 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+      # The OS capability contract schema (read-only), for the contract test of ECOSYSTEM_ROADMAP.md step 1.
+      - uses: actions/checkout@v4
+        with:
+          repository: kajisho5/AI-video-production-OS
+          path: _os
+          sparse-checkout: registry
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
       - run: pip install -e .
       # Standard library only: --hash xxh64 must be refused as HASH_UNAVAILABLE, sha256 + c4 must work.
-      - run: python -m unittest -v tests/test_ingest.py
+      - run: python -m unittest discover -v -s tests
       - run: ingest contract --json
-      - run: pip install -e ".[xxhash]"
-      # With the optional extra: the xxh64 offload / ASC MHL / verify tests run too.
-      - run: python -m unittest -v tests/test_ingest.py
+      # With the optional extra: the xxh64 offload / ASC MHL / verify tests run too. jsonschema is a test-only tool
+      # (not a dependency): with it, `ingest contract --json` must validate against the OS schema (required here).
+      - run: pip install -e ".[xxhash]" jsonschema
+      - run: python -m unittest discover -v -s tests
+        env:
+          INGEST_REQUIRE_CONTRACT_SCHEMA: "1"
+          INGEST_OS_CONTRACT_SCHEMA: ${{ github.workspace }}/_os/registry/capability_contract.schema.json
       - run: ingest doctor --json

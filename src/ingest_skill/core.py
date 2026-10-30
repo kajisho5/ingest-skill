@@ -8,6 +8,8 @@ Guarantees:
   reported as a conflict and the run fails.
 - Symbolic links are not followed; they are listed as skipped.
 - Every destination gets ingest-manifest.json (sha256 or xxh64) and an ASC MHL history (ascmhl/), see mhl.py.
+- The card structure (cards.py) is reporting only: it names the reel and groups the inventory, it never decides
+  which file is copied or what it is called inside the card folder.
 """
 from __future__ import annotations
 
@@ -21,7 +23,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
 
-from . import __version__, mhl
+from . import __version__, cards, mhl
 from .errors import IngestError
 from .hashing import CHUNK, DEFAULT_HASH, INSTALL_HINT, MHL_FORMAT_FOR, OFFLOAD_HASHES, MultiHash, available, hash_file, require
 
@@ -29,7 +31,8 @@ MANIFEST_NAME = "ingest-manifest.json"
 MANIFEST_SCHEMA = "ingest/manifest@1"
 # Card and OS housekeeping files: recorded as skipped, never copied.
 JUNK_NAMES = {".DS_Store", "Thumbs.db", "desktop.ini", ".Spotlight-V100", ".Trashes", ".fseventsd", ".TemporaryItems", "System Volume Information", "$RECYCLE.BIN"}
-MEDIA_EXTENSIONS = {".mp4", ".mov", ".mxf", ".mts", ".m2ts", ".avi", ".mkv", ".braw", ".r3d", ".crm", ".mpg", ".mpeg", ".wav", ".bwf", ".mp3", ".aac", ".m4a", ".flac", ".aif", ".aiff"}
+MEDIA_EXTENSIONS = cards.MEDIA_EXTENSIONS
+NAME_BY = ("folder", "reel")
 
 
 @dataclass
@@ -69,9 +72,11 @@ class OffloadReport:
     ok: bool = True
     started_at: str = ""
     finished_at: str = ""
+    card: Dict = field(default_factory=dict)   # {"reel": {...}, "name_by": "folder" | "reel"}
 
     def to_dict(self) -> Dict:
         return {"schema": "ingest/offload-report@1", "ok": self.ok, "dry_run": self.dry_run, "source": self.source, "hash": self.hash, "bytes_total": self.bytes_total,
+                "card": self.card,
                 "destinations": [asdict(d) for d in self.destinations], "files": [asdict(f) for f in self.files],
                 "skipped": [asdict(f) for f in self.skipped], "started_at": self.started_at, "finished_at": self.finished_at}
 
@@ -190,10 +195,31 @@ def _mhl_actions(history: "mhl.History", path: str, digests: Dict[str, str]) -> 
     return ("verified" if checked else "original"), unchecked
 
 
-def offload(source: str, destinations: Iterable[str], project: Optional[str] = None, dry_run: bool = False, hash_algorithm: str = DEFAULT_HASH) -> OffloadReport:
+def check_reel(reel: Optional[str]) -> Optional[str]:
+    """An operator-given reel / card id must be usable as one folder name on every OS."""
+    if reel is not None and not cards.REEL_SAFE.match(reel):
+        raise IngestError("REEL_INVALID", f"reel {reel!r}: use 1-64 letters, digits, '.', '_' or '-', starting with a letter or digit")
+    return reel
+
+
+def card_reel(src: Path, files: List[Path], reel: Optional[str] = None, recorded: Optional[Dict] = None) -> Tuple[Dict, List[str]]:
+    """The reel of a card folder from file names and sizes only (no file is opened), see cards.derive_reel."""
+    rels = [f.relative_to(src).as_posix() for f in files]
+    analysis = cards.analyse(src, rels, parse=False)
+    return cards.derive_reel(analysis.clips, [(r, f.stat().st_size) for r, f in zip(rels, files)], operator=reel, recorded=recorded)
+
+
+def offload(source: str, destinations: Iterable[str], project: Optional[str] = None, dry_run: bool = False, hash_algorithm: str = DEFAULT_HASH,
+            name_by: str = "folder", reel: Optional[str] = None) -> OffloadReport:
+    """Copy the card folder to each destination as <dest>/<project>/<name>, where name is the source folder's name
+    (name_by="folder", the default) or its reel / card id (name_by="reel", see cards.derive_reel). Every file of the
+    folder is copied unchanged, whatever its card structure."""
     src = Path(source).resolve()
     if not src.is_dir():
         raise IngestError("SOURCE_NOT_FOUND", f"source {source} is not a directory")
+    if name_by not in NAME_BY:
+        raise IngestError("REEL_INVALID", f"name_by must be one of {', '.join(NAME_BY)}")
+    check_reel(reel)
     if hash_algorithm not in OFFLOAD_HASHES:
         raise IngestError("HASH_UNAVAILABLE", f"unknown hash {hash_algorithm!r}; offload accepts {', '.join(OFFLOAD_HASHES)}")
     require([hash_algorithm, MHL_FORMAT_FOR[hash_algorithm]])
@@ -202,15 +228,16 @@ def offload(source: str, destinations: Iterable[str], project: Optional[str] = N
         raise IngestError("NO_DESTINATION", "at least one --dest is required")
     if len(set(dests)) != len(dests):
         raise IngestError("DUPLICATE_DESTINATION", "the same destination was given twice; a second copy must be on a different path (ideally a different drive)")
-    roots: List[Path] = []
     for d in dests:
         if _inside(d, src) or _inside(src, d):
             raise IngestError("DESTINATION_OVERLAPS_SOURCE", f"{d} and the source {src} contain one another")
-        roots.append(d / project / src.name if project else d / src.name)
     files, skipped = scan(src)
+    reel_info, reel_warnings = card_reel(src, files, reel)
+    name = reel_info["id"] if name_by == "reel" else src.name
+    roots = [d / project / name if project else d / name for d in dests]
     started = datetime.now(timezone.utc)
-    report = OffloadReport(source=str(src), destinations=[DestResult(root=str(r)) for r in roots], skipped=skipped, hash=hash_algorithm,
-                           dry_run=dry_run, started_at=started.strftime("%Y-%m-%dT%H:%M:%SZ"))
+    report = OffloadReport(source=str(src), destinations=[DestResult(root=str(r), warnings=list(reel_warnings)) for r in roots], skipped=skipped, hash=hash_algorithm,
+                           dry_run=dry_run, started_at=started.strftime("%Y-%m-%dT%H:%M:%SZ"), card={"reel": reel_info, "name_by": name_by})
     mhl_format = MHL_FORMAT_FOR[hash_algorithm]
     histories: List[mhl.History] = []
     if not dry_run:
@@ -301,6 +328,8 @@ def write_manifest(root: Path, report: OffloadReport) -> Path:
     algo = report.hash
     entries = [{"path": f.path, "size": f.size, algo: f.hashes[algo], "mtime": f.mtime} for f in report.files if algo in f.hashes and f.status in ("copied", "skipped_identical")]
     doc = {"schema": MANIFEST_SCHEMA, "tool": f"ingest-skill {__version__}", "source": report.source, "created_at": _now(), "hash": algo, "files": entries}
+    if report.card.get("reel"):  # optional: the reel this copy was made under, so inventory keeps an operator-given one
+        doc["card"] = {"reel": report.card["reel"]["id"], "reel_source": report.card["reel"]["source"]}
     path = root / MANIFEST_NAME
     tmp = root / (MANIFEST_NAME + ".part")
     tmp.write_text(json.dumps(doc, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -421,29 +450,54 @@ def clip_facts(path: Path) -> Dict:
             "timecode": tags.get("timecode"), "creation_time": tags.get("creation_time")}
 
 
-def inventory(target: str) -> Dict:
-    """The clip list of an offloaded folder: every media file with size, its manifest hash and measured facts."""
+def _member(root: Path, rel: str, hashes: Dict[str, str], algo: Optional[str]) -> Dict:
+    f = root / rel
+    return {"path": rel, "size": f.stat().st_size, "hash": {"algorithm": algo, "value": hashes[rel]} if rel in hashes else None, **clip_facts(f)}
+
+
+def inventory(target: str, reel: Optional[str] = None) -> Dict:
+    """The clip list of a card or an offloaded folder, one entry per recording (cards.py): a recording split across
+    files (spanned) is one clip whose `members` are listed in recording order. Each clip carries its sidecars (and
+    what they reliably say), proxies and related files, its manifest hash(es) and measured facts. Reads only."""
     root = Path(target).resolve()
     if not root.is_dir():
         raise IngestError("SOURCE_NOT_FOUND", f"{target} is not a directory")
+    check_reel(reel)
     hashes: Dict[str, str] = {}
     algo: Optional[str] = None
+    recorded: Optional[Dict] = None
     if (root / MANIFEST_NAME).is_file():
         _, doc = load_manifest(str(root))
         algo = doc["hash"]
         hashes = {e["path"]: e[algo] for e in doc["files"]}
+        recorded = doc.get("card") if isinstance(doc.get("card"), dict) else None
     files, _ = scan(root)
+    rels = [f.relative_to(root).as_posix() for f in files]
+    analysis = cards.analyse(root, rels)
+    reel_info, reel_warnings = cards.derive_reel(analysis.clips, [(r, f.stat().st_size) for r, f in zip(rels, files)], operator=reel, recorded=recorded)
     clips = []
     total = 0.0
-    for f in files:
-        if f.suffix.lower() not in MEDIA_EXTENSIONS:
-            continue
-        rel = f.relative_to(root).as_posix()
-        facts = clip_facts(f)
+    for c in analysis.clips:
+        members = [_member(root, rel, hashes, algo) for rel in c.members]
+        first = members[0]
+        facts = {k: v for k, v in first.items() if k not in ("path", "size", "hash")}
+        if len(members) > 1:  # a spanned recording: its duration is the members' sum, known only when every member was probed
+            durations = [m.get("duration_s") for m in members]
+            facts["probed"] = all(m["probed"] for m in members)
+            facts["duration_s"] = round(sum(durations), 3) if facts["probed"] and None not in durations else None
         total += facts.get("duration_s") or 0.0
-        clips.append({"path": rel, "size": f.stat().st_size, "sha256": hashes.get(rel) if algo == "sha256" else None,
-                      "hash": {"algorithm": algo, "value": hashes[rel]} if rel in hashes else None, **facts})
-    return {"schema": "ingest/inventory@1", "root": str(root), "clips": clips, "clip_count": len(clips), "total_duration_s": round(total, 3),
+        single = len(members) == 1
+        clips.append({"clip_id": c.clip_id, "structure": c.structure, "path": first["path"], "spanned": not single, "incomplete": c.incomplete,
+                      "size": sum(m["size"] for m in members),
+                      "sha256": first["hash"]["value"] if single and algo == "sha256" and first["hash"] else None,
+                      "hash": first["hash"] if single else None,
+                      "members": [{k: m[k] for k in ("path", "size", "hash", "probed", "duration_s") if k in m} for m in members],
+                      "sidecars": c.sidecars, "proxies": c.proxies, "related": c.related, "metadata": c.metadata, **facts})
+    return {"schema": "ingest/inventory@2", "root": str(root),
+            "card": {"reel": reel_info, "structures": analysis.structures, "index_files": analysis.index_files},
+            "clips": clips, "clip_count": len(clips), "file_count": sum(len(c["members"]) for c in clips),
+            "spanned_count": sum(1 for c in clips if c["spanned"]), "total_duration_s": round(total, 3),
+            "warnings": reel_warnings + analysis.warnings,
             "probe": "ffprobe" if shutil.which("ffprobe") else "unavailable (facts are unknown, not zero)", "generated_at": _now()}
 
 
