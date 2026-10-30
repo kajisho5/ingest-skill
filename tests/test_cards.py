@@ -159,7 +159,7 @@ def files_and_hashes(root: Path):
 
 class CardTests(unittest.TestCase):
     def setUp(self):
-        self.tmp = Path(tempfile.mkdtemp())
+        self.tmp = Path(tempfile.mkdtemp()).resolve()  # offload reports resolved paths (macOS /private/var, Windows 8.3 names)
 
     def tearDown(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
@@ -290,7 +290,7 @@ class CardTests(unittest.TestCase):
 
 class OffloadKeepsTheCardWholeTests(unittest.TestCase):
     def setUp(self):
-        self.tmp = Path(tempfile.mkdtemp())
+        self.tmp = Path(tempfile.mkdtemp()).resolve()  # offload reports resolved paths (macOS /private/var, Windows 8.3 names)
 
     def tearDown(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
