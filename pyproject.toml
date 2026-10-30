@@ -17,7 +17,8 @@ dependencies = []
 # xxh64 offloads (--hash xxh64) and checking xxh3 / xxh128 ASC MHL records. Without it those are UNAVAILABLE.
 xxhash = ["xxhash>=3.0"]
 # `ingest fetch <url>`: yt-dlp, used as a library (ADR-005). Without it fetch is UNAVAILABLE; nothing else needs it.
-fetch = ["yt-dlp>=2024.8.6"]
+# Floor per Python (ADR-006): 2026.7.4 clears every published advisory but needs Python 3.10; 3.9 gets its last release.
+fetch = ["yt-dlp>=2026.7.4; python_version >= '3.10'", "yt-dlp>=2025.10.14; python_version < '3.10'"]
 
 [project.scripts]
 ingest = "ingest_skill.cli:main"
