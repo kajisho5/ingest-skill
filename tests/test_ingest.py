@@ -368,6 +368,39 @@ class InventoryAndContractTests(unittest.TestCase):
         for code in ("SOURCE_CHANGED", "VERIFY_MISMATCH", "HASH_UNAVAILABLE", "FILE_MISSING", "MHL_INVALID"):
             self.assertIn(code, c["errors"])
 
+    def test_contract_validates_against_the_os_json_schema(self):
+        # ECOSYSTEM_ROADMAP.md step 1: `ingest contract --json` against the OS registry/capability_contract.schema.json.
+        # jsonschema is not a dependency: without it (or without the schema) this skips, unless
+        # INGEST_REQUIRE_CONTRACT_SCHEMA=1 (set in CI, which installs jsonschema and checks out the OS registry).
+        required = os.environ.get("INGEST_REQUIRE_CONTRACT_SCHEMA") == "1"
+        try:
+            import jsonschema
+        except ImportError:
+            if required:
+                raise
+            self.skipTest("jsonschema not installed")
+        candidates = [os.environ.get("INGEST_OS_CONTRACT_SCHEMA", ""),
+                      str(Path(__file__).resolve().parents[2] / "AI-video-production-OS" / "registry" / "capability_contract.schema.json")]
+        schema_path = next((Path(c) for c in candidates if c and Path(c).is_file()), None)
+        if schema_path is None:
+            if required:
+                self.fail(f"no OS capability contract schema at {candidates}")
+            self.skipTest("the OS registry/capability_contract.schema.json is not checked out")
+        schema = json.loads(schema_path.read_text(encoding="utf-8"))
+        validator_cls = jsonschema.validators.validator_for(schema)
+        validator_cls.check_schema(schema)
+        code, out = run_cli("contract", "--json")
+        self.assertEqual(code, 0)
+        doc = json.loads(out)
+        errors = sorted(validator_cls(schema).iter_errors(doc), key=lambda e: list(e.path))
+        self.assertEqual([f"{list(e.path)}: {e.message}" for e in errors], [])
+        # The validator is really checking: a contract with no identity, or a bad lifecycle, is rejected.
+        anonymous = {k: v for k, v in doc.items() if k not in ("skill_id", "id", "skill")}
+        self.assertFalse(validator_cls(schema).is_valid(anonymous))
+        bad = json.loads(out)
+        bad["provides"][0]["lifecycle"] = "SHIPPED"
+        self.assertFalse(validator_cls(schema).is_valid(bad))
+
     def test_inventory_lists_media_with_manifest_hashes(self):
         tmp = Path(tempfile.mkdtemp())
         card = make_card(tmp)
