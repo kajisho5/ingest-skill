@@ -16,6 +16,7 @@ v0.1.0 on the PR branch (main has only the initial commit). Python 3.9+ stdlib. 
 | 素材取り込み(検証付きコピー) | done |  |
 | 二重バックアップ | done | destinations copied one after another; the source is re-read per destination |
 | 素材台帳 | partial | ffprobe facts + timecode; no spanned-clip / card-structure awareness, no sidecars |
+| URL素材取得 | missing | owned here since 2026-10-30 (owner decision); the agent's yt-dlp call (`agent/ingest.py`) moves here |
 
 ## Wiring
 
@@ -35,10 +36,12 @@ No adapter in the agent. Calls ffprobe directly; proxies stay with ffmpeg-skill 
   - Done when: a test counts one read per file
 - [ ] **6. Agent adapter + SkillSpec media_offload** — inventory becomes OBSERVED observations on new assets
   - Done when: `video-agent plan <card>` offloads then analyses, with provenance
+- [ ] **7. `ingest fetch <url>`** — URL download through yt-dlp (optional dependency, reported by doctor), the same verify + manifest + inventory as a card, source URL and extractor version recorded
+  - Done when: a fixture URL (local HTTP server) lands with a manifest; the agent calls ingest-skill instead of yt-dlp
 
 ## Boundaries
 
-URL download currently lives in the agent (yt-dlp); ownership to decide.
+URL download (URL素材取得) is owned here since 2026-10-30 (owner decision); until step 7 ships, the agent keeps its own yt-dlp call.
 
 ---
 Engine for every media operation: [ffmpeg-skill](https://github.com/kajisho5/ffmpeg-skill) (42 tools, treated as complete). Orchestrator: [video-production-agent](https://github.com/kajisho5/video-production-agent).
