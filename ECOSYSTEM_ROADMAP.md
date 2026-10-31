@@ -34,8 +34,9 @@ No adapter in the agent. Calls ffprobe directly; proxies stay with ffmpeg-skill 
   - Done when: fixture card trees give one clip per recording
 - [x] **5. Read the source once for all destinations** — single read, fan-out writes ([#8](https://github.com/kajisho5/ingest-skill/pull/8), ADR-004)
   - Done when: a test counts one read per file
-- [ ] **6. Agent adapter + SkillSpec media_offload** — inventory becomes OBSERVED observations on new assets
+- [x] **6. Agent adapter + SkillSpec media_offload** — inventory becomes OBSERVED observations on new assets ([video-production-agent#83](https://github.com/kajisho5/video-production-agent/pull/83))
   - Done when: `video-agent plan <card>` offloads then analyses, with provenance
+  - Done (video-production-agent ADR-066): a card folder with `ingest.dest` plans one always-CONFIRM `media_offload` step from `offload --dry-run` + `inventory`; after approval `render` runs `ingest offload` once, checks every destination's manifest, and the first copy's inventory becomes new assets with OBSERVED `ingest_clip` observations (clip, members, reel, hashes, sidecar facts, MHL); the agent's own analysis then runs on the verified copies. The agent pins this contract at 0.1.0 and checks live == pin against main
 - [x] **7. `ingest fetch <url>`** — URL download through yt-dlp (optional dependency, reported by doctor), the same verify + manifest + inventory as a card, source URL and extractor version recorded ([#9](https://github.com/kajisho5/ingest-skill/pull/9), ADR-005; the agent's switch to `ingest fetch` is its own change)
   - Done when: a fixture URL (local HTTP server) lands with a manifest; the agent calls ingest-skill instead of yt-dlp
 
