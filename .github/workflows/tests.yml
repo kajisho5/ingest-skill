@@ -26,7 +26,7 @@ jobs:
       # The OS capability contract schema (read-only), for the contract test of ECOSYSTEM_ROADMAP.md step 1.
       - uses: actions/checkout@v4
         with:
-          repository: kajisho5/AI-video-production-OS
+          repository: kajisho5/Velisa
           path: _os
           sparse-checkout: registry
       - uses: actions/setup-python@v5
