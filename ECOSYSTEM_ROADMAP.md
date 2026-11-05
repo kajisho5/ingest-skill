@@ -16,11 +16,11 @@ v0.1.0 on main, SKILL.md on the default branch. Python 3.9+ stdlib (`xxhash` and
 | 素材取り込み(検証付きコピー) | done |  |
 | 二重バックアップ | done | the source is read once per file and written to every destination in parallel; each destination read back and verified on its own; a failed drive does not stop the others (ADR-004) |
 | 素材台帳 | done | one clip per recording (Sony XDCAM / XAVC, XDCAM EX, AVCHD, BRAW, generic), camera sidecars, reel / card id, ffprobe facts; P2 / Canon XF / RED listed file by file |
-| URL素材取得 | done | `ingest fetch <url>` ([#9](https://github.com/kajisho5/ingest-skill/pull/9), ADR-005); the agent still has its own yt-dlp call (`agent/ingest.py`) until it switches to `ingest fetch` |
+| URL素材取得 | done | `ingest fetch <url>` ([#9](https://github.com/kajisho5/ingest-skill/pull/9), ADR-005); the agent calls `ingest fetch` instead of its own yt-dlp (video-production-agent#77, its ADR-059) |
 
 ## Wiring
 
-No adapter in the agent. Calls ffprobe directly; proxies stay with ffmpeg-skill `proxy`.
+The agent's adapter runs `offload` / `inventory` (step 6, video-production-agent#83) and `fetch` (its ADR-059). Calls ffprobe directly; proxies stay with ffmpeg-skill `proxy`.
 
 ## Steps
 
@@ -42,7 +42,7 @@ No adapter in the agent. Calls ffprobe directly; proxies stay with ffmpeg-skill 
 
 ## Boundaries
 
-URL download (URL素材取得) is owned here since 2026-10-30 (owner decision) and ships as `ingest fetch` (step 7); the agent keeps its own yt-dlp call only until it switches to `ingest fetch ... --json`.
+URL download (URL素材取得) is owned here since 2026-10-30 (owner decision) and ships as `ingest fetch` (step 7); the agent has switched to `ingest fetch ... --json` (its ADR-059).
 
 ---
-Engine for every media operation: [ffmpeg-skill](https://github.com/kajisho5/ffmpeg-skill) (42 tools, treated as complete). Orchestrator: [video-production-agent](https://github.com/kajisho5/video-production-agent).
+Engine for every media operation: [ffmpeg-skill](https://github.com/kajisho5/ffmpeg-skill) (3.x, 42 tools, contract_version 2.0; treated as complete, proposals go to Velisa's ROADMAP). Orchestrator: [video-production-agent](https://github.com/kajisho5/video-production-agent).
