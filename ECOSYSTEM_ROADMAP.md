@@ -39,6 +39,18 @@ The agent's adapter runs `offload` / `inventory` (step 6, video-production-agent
   - Done (video-production-agent ADR-066): a card folder with `ingest.dest` plans one always-CONFIRM `media_offload` step from `offload --dry-run` + `inventory`; after approval `render` runs `ingest offload` once, checks every destination's manifest, and the first copy's inventory becomes new assets with OBSERVED `ingest_clip` observations (clip, members, reel, hashes, sidecar facts, MHL); the agent's own analysis then runs on the verified copies. The agent pins this contract at 0.1.0 and checks live == pin against main
 - [x] **7. `ingest fetch <url>`** — URL download through yt-dlp (optional dependency, reported by doctor), the same verify + manifest + inventory as a card, source URL and extractor version recorded ([#9](https://github.com/kajisho5/ingest-skill/pull/9), ADR-005; the agent's switch to `ingest fetch` is its own change)
   - Done when: a fixture URL (local HTTP server) lands with a manifest; the agent calls ingest-skill instead of yt-dlp
+- [ ] **8. Recordings still being written (growing files)** — `offload --follow`: a file whose size or mtime is still changing is copied as it grows (appended bytes only, re-read from the last verified offset) and marked `growing: true` in the manifest; it is hashed, verified and written into the MHL only once it has been stable for a stated window or the recorder closed it. Field review 2026-11-05 (Velisa ROADMAP, third round)
+  - なぜ要るか：終日の学会収録を、休憩ごとに途中まで取り込んで編集を始められる
+  - Done when: a fixture file appended in three bursts ends with one verified copy and one MHL entry; a copy taken mid-growth is never sealed
+- [ ] **9. Sync facts and multicam sets in the inventory** — per clip: start timecode, frame rate, whether an audio channel carries LTC (detected, not decoded), recorder and camera ids, wall-clock start; clips from different cards whose times overlap are grouped as a `sync_group` candidate for ffmpeg-skill `multicam` / `sync`
+  - なぜ要るか：カメラと別録りレコーダーの素材を、取り込み時点でマルチカム用にまとめられる
+  - Done when: a fixture with two cameras and one recorder over the same 10 minutes gives one sync group with three members
+- [ ] **10. Progress, speed and ETA** — `--progress` writes JSON lines (file, bytes, MB/s per destination, ETA); a destination much slower than the others is warned about while the copy runs
+  - なぜ要るか：現場で「あと何分で取り込みが終わるか」と遅いドライブがすぐ分かる
+  - Done when: a fixture run emits monotonic progress, and a throttled destination raises the warning
+- [ ] **11. Proxies queued at ingest** — after a clip is verified, ffmpeg-skill `proxy` runs on it (a hardware encoder when doctor reports one) while the next files copy; the proxy and its original are linked in the inventory by hash
+  - なぜ要るか：撮って出しで、カード取り込みが終わった時点でノートPCで編集できる軽い素材が揃う
+  - Done when: an offload with `--proxy` gives one proxy per clip linked by the original's hash; a failed proxy does not fail the offload
 
 ## Boundaries
 
