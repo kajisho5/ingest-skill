@@ -151,9 +151,13 @@ def parse_nonrealtimemeta(root: ET.Element) -> Dict:
     frames = _int(_attr(_kid(root, "Duration"), "value"))
     if frames is not None:
         out["duration_frames"] = frames
-    ltc_fps = _attr(_kid(root, "LtcChangeTable"), "tcFps")
+    ltc_table = _kid(root, "LtcChangeTable")
+    ltc_fps = _attr(ltc_table, "tcFps")
     if ltc_fps is not None:
         out["ltc_fps"] = ltc_fps
+    first = next((c for c in _kids(ltc_table, "LtcChange") if c.get("frameCount") == "0"), None) if ltc_table is not None else None
+    if _attr(first, "value") is not None:   # the timecode at the first frame, as the camera wrote it (decoded in sync.py)
+        out["ltc_start"] = _attr(first, "value")
     vf = _kid(root, "VideoFormat")
     frame, layout = _kid(vf, "VideoFrame"), _kid(vf, "VideoLayout")
     video = {k: v for k, v in (("format_fps", _attr(frame, "formatFps")), ("codec", _attr(frame, "videoCodec")),

@@ -15,6 +15,7 @@ Run `ingest <command> ... --json` (installed by `pip install -e .`). Every comma
 | Offload a recording still being written | add `--follow` (sealed once unchanged for `--settle` seconds, default 30; `--follow-for 60` to stop after a minute and leave partial copies) |
 | Re-check a backup | `ingest verify /Volumes/SSD1/Footage/2026-10-30_event/CARD_A --json` |
 | Clip list | `ingest inventory /Volumes/SSD1/Footage/2026-10-30_event/CARD_A --json` |
+| Group cameras and a recorder for multicam | `ingest inventory /Volumes/SSD1/Footage/ev/CAM_A /Volumes/SSD1/Footage/ev/CAM_B /Volumes/SSD1/Footage/ev/REC --json` (`sync_groups`) |
 | Name the copy after the card's reel | add `--name-by reel` to offload (`--reel B007` to set it yourself) |
 | Download a video URL as footage | `ingest fetch "<url>" --dest /Volumes/SSD1/Footage --project 2026-10-30_event --json` (needs `pip install -e ".[fetch]"`; check `yt-dlp` in `ingest doctor --json`) |
 | What this skill declares | `ingest contract --json`, `ingest doctor --json` |
@@ -50,6 +51,7 @@ Exit codes: `0` ok, `2` refused (including `HASH_UNAVAILABLE`: xxh64 without the
 - Sidecar `metadata` holds only what the camera wrote; a missing key is unknown. `warnings` (a clip missing from MEDIAPRO.XML, an unreadable playlist or sidecar) are card-health notes to pass on.
 - `inventory` reads clip facts with `ffprobe`. When `probed` is false the facts are **unknown**, not zero (ffprobe missing, or a file it cannot read).
 - A `growing` file (offload status, `destinations[].growing`, verify `growing`, inventory `"growing": true`) is a verified **partial** copy of a recording still in progress: say it can be edited but is not a finished backup, and that re-running `offload --follow` (or a plain offload once recording has ended) completes and seals it. Never call it verified.
+- A `sync_group` is a **candidate** from the devices' clocks (`basis`: timecode, utc or local), not a measured sync: pass its `next` call to ffmpeg-skill `multicam` (or `sync`) and report the offsets that measures. `sync` facts that are null are unknown; `ltc.checked: false` means the audio was not analysed (no ffmpeg), not that there is no LTC.
 - Two copies on the same physical drive are not a backup; say so if both destinations are on one volume.
 
 ## Not this skill's job

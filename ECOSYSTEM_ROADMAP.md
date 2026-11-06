@@ -15,7 +15,7 @@ v0.1.0 on main, SKILL.md on the default branch. Python 3.9+ stdlib (`xxhash` and
 |---|---|---|
 | 素材取り込み(検証付きコピー) | done |  |
 | 二重バックアップ | done | the source is read once per file and written to every destination in parallel; each destination read back and verified on its own; a failed drive does not stop the others (ADR-004) |
-| 素材台帳 | done | one clip per recording (Sony XDCAM / XAVC, XDCAM EX, AVCHD, BRAW, generic), camera sidecars, reel / card id, ffprobe facts; P2 / Canon XF / RED listed file by file |
+| 素材台帳 | done | one clip per recording (Sony XDCAM / XAVC, XDCAM EX, AVCHD, BRAW, generic), camera sidecars, reel / card id, ffprobe facts, sync facts and multicam sync-group candidates; P2 / Canon XF / RED listed file by file |
 | URL素材取得 | done | `ingest fetch <url>` ([#9](https://github.com/kajisho5/ingest-skill/pull/9), ADR-005); the agent calls `ingest fetch` instead of its own yt-dlp (video-production-agent#77, its ADR-059) |
 
 ## Wiring
@@ -43,9 +43,10 @@ The agent's adapter runs `offload` / `inventory` (step 6, video-production-agent
   - なぜ要るか：終日の学会収録を、休憩ごとに途中まで取り込んで編集を始められる
   - Done when: a fixture file appended in three bursts ends with one verified copy and one MHL entry; a copy taken mid-growth is never sealed
   - Done (ADR-007): `offload --follow [--settle S] [--poll P] [--follow-for T]`; a growing file is appended pass by pass from its last verified offset, each appended range read back, and listed under the manifest's optional `"growing"` (`"growing": true`, verified size and hash); it is sealed (full read-back, manifest `files`, ASC MHL) only after S seconds unchanged, with a full re-hash of the source when it was read in several passes (a header rewritten at close is found and the file copied again). `verify` reports a partial copy as `growing` / `INCOMPLETE`, `inventory` marks the clip; the next run (or a plain offload once recording ended) continues it. Whether the recorder still holds the file open is not detected (no portable API): the settle window is the end-of-recording signal
-- [ ] **9. Sync facts and multicam sets in the inventory** — per clip: start timecode, frame rate, whether an audio channel carries LTC (detected, not decoded), recorder and camera ids, wall-clock start; clips from different cards whose times overlap are grouped as a `sync_group` candidate for ffmpeg-skill `multicam` / `sync`
+- [x] **9. Sync facts and multicam sets in the inventory** — per clip: start timecode, frame rate, whether an audio channel carries LTC (detected, not decoded), recorder and camera ids, wall-clock start; clips from different cards whose times overlap are grouped as a `sync_group` candidate for ffmpeg-skill `multicam` / `sync` ([#16](https://github.com/kajisho5/ingest-skill/pull/16), ADR-008)
   - なぜ要るか：カメラと別録りレコーダーの素材を、取り込み時点でマルチカム用にまとめられる
   - Done when: a fixture with two cameras and one recorder over the same 10 minutes gives one sync group with three members
+  - Done (ADR-008): every inventory clip has `sync` (start timecode, time of day, frame and timecode rates, LTC channels detected from the signal, camera / recorder ids, wall-clock start, duration, each with its source: ffprobe, Sony NonRealTimeMeta, Broadcast Wave `bext` / `iXML`); `ingest inventory <card> <card> ...` gives `ingest/inventory-set@1` with `sync_groups` (clips of different cards overlapping on timecode, else UTC, else local clock), each with the reference and the ffmpeg-skill `scripts/multicam.py --offsets-only` call. LTC in video files needs ffmpeg on PATH (WAV is checked with the standard library); the Sony LtcChange byte order is checked against fixtures only, not a real card
 - [ ] **10. Progress, speed and ETA** — `--progress` writes JSON lines (file, bytes, MB/s per destination, ETA); a destination much slower than the others is warned about while the copy runs
   - なぜ要るか：現場で「あと何分で取り込みが終わるか」と遅いドライブがすぐ分かる
   - Done when: a fixture run emits monotonic progress, and a throttled destination raises the warning
