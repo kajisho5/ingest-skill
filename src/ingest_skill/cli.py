@@ -27,13 +27,17 @@ def _offload_summary(d: Dict[str, Any]) -> str:
     reel = d["card"]["reel"]
     lines = [f"{'DRY RUN: ' if d['dry_run'] else ''}{len(d['files'])} files, {d['bytes_total'] / 1e9:.2f} GB from {d['source']} ({d['hash']}), reel {reel['id']} ({reel['source']})"]
     for dst in d["destinations"]:
-        lines.append(f"  {dst['root']}: copied {dst['copied']}, identical {dst['skipped_identical']}, conflicts {dst['conflicts']}, failed {dst['failed']}")
+        lines.append(f"  {dst['root']}: copied {dst['copied']}, identical {dst['skipped_identical']}, conflicts {dst['conflicts']}, failed {dst['failed']}"
+                     + (f", growing {dst['growing']} (partial copies, not sealed)" if dst.get("growing") else ""))
         if dst["mhl"]:
             lines.append(f"    ASC MHL: {dst['mhl']}")
         for prob in dst["problems"]:
             lines.append(f"    {prob['code']}: {prob['detail']}")
         if dst["mhl_failed"]:
             lines.append(f"    {dst['mhl_failed']} file(s) differ from their earlier ASC MHL record")
+    if d.get("follow"):
+        fo = d["follow"]
+        lines.append(f"  followed {len(fo['files'])} growing file(s) over {fo['polls']} poll(s), settle {fo['settle_s']:g} s; stopped: {fo['stopped']}")
     if d["skipped"]:
         lines.append(f"  skipped {len(d['skipped'])} (card housekeeping, symbolic links, the folder's own manifest / ascmhl history)")
     lines.append("OK: every copy verified" if d["ok"] else "INCOMPLETE: see conflicts / failures (run with --json for details)")
@@ -59,6 +63,12 @@ def main(argv: Optional[List[str]] = None) -> int:
                    help="name of the card folder in each destination: the source folder's name (default) or the card's reel id "
                         "(--reel, else the camera ID + reel number of its clip names, else CARD-<fingerprint>)")
     p.add_argument("--reel", help="the card's reel / card id, overriding what the card says (letters, digits, . _ -)")
+    p.add_argument("--follow", action="store_true",
+                   help="copy recordings still being written as they grow (appended bytes only) and seal each one once it has "
+                        "stopped changing for --settle seconds; until then it is a verified partial copy listed as growing")
+    p.add_argument("--settle", type=float, help="with --follow: seconds a file's size and mtime must stay unchanged before it is sealed (default 30)")
+    p.add_argument("--poll", type=float, help="with --follow: seconds between looks at the source (default 2)")
+    p.add_argument("--follow-for", type=float, help="with --follow: stop after this many seconds, leaving unsealed files as growing partial copies")
     p.add_argument("--json", action="store_true")
     p = sub.add_parser("fetch", help="download one video URL with yt-dlp (optional extra), then offload it like a card, verified")
     p.add_argument("url", help="the URL of one video; you must have the right to download it")
@@ -86,7 +96,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             _emit(d, a.json, "\n".join(f"{k}: {v['status']} {v.get('detail', '')}" for k, v in d["checks"].items()))
             return 0 if d["ok"] else 3
         if a.cmd == "offload":
-            d = offload(a.source, a.dest, project=a.project, dry_run=a.dry_run, hash_algorithm=a.hash, name_by=a.name_by, reel=a.reel).to_dict()
+            d = offload(a.source, a.dest, project=a.project, dry_run=a.dry_run, hash_algorithm=a.hash, name_by=a.name_by, reel=a.reel,
+                        follow=a.follow, settle_s=a.settle, poll_s=a.poll, follow_for_s=a.follow_for).to_dict()
             _emit(d, a.json, _offload_summary(d))
             return 0 if d["ok"] else ERRORS["INCOMPLETE"]["exit_code"]
         if a.cmd == "fetch":

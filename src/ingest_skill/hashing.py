@@ -82,12 +82,33 @@ class MultiHash:
     def digests(self) -> Dict[str, str]:
         return {a: c4_encode(h.digest()) if a == "c4" else h.hexdigest() for a, h in self._h.items()}
 
+    def copy(self) -> "MultiHash":
+        """An independent copy of the running state (hashlib and xxhash objects copy their state)."""
+        m = MultiHash(())
+        m._h = {a: h.copy() for a, h in self._h.items()}
+        return m
+
 
 def hash_file(path: Path, algorithms: Iterable[str]) -> Dict[str, str]:
     m = MultiHash(algorithms)
     with open(path, "rb") as f:
         for chunk in iter(lambda: f.read(CHUNK), b""):
             m.update(chunk)
+    return m.digests()
+
+
+def hash_range(path: Path, start: int, end: int, algorithms: Iterable[str]) -> Dict[str, str]:
+    """Digests of the bytes [start, end) of path; raises when the file is shorter than end."""
+    m = MultiHash(algorithms)
+    with open(path, "rb") as f:
+        f.seek(start)
+        left = end - start
+        while left > 0:
+            chunk = f.read(min(CHUNK, left))
+            if not chunk:
+                raise OSError(f"{path}: ends before byte {end}")
+            m.update(chunk)
+            left -= len(chunk)
     return m.digests()
 
 
