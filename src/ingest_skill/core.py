@@ -12,6 +12,9 @@ Guarantees:
 - Every destination gets ingest-manifest.json (sha256 or xxh64) and an ASC MHL history (ascmhl/), see mhl.py.
 - The card structure (cards.py) is reporting only: it names the reel and groups the inventory, it never decides
   which file is copied or what it is called inside the card folder.
+- `offload --follow` (follow.py) copies recordings still being written as they grow (appended bytes only) and seals
+  each one (manifest "files", ASC MHL) only once it has stopped changing for the settle window (ADR-007). Until then
+  the copy is listed under the manifest's optional "growing" key and is never in the ASC MHL.
 - `ingest fetch` (fetch.py) downloads a URL into a staging folder and offloads that folder through this same path; its
   download record is carried as the optional "fetch" key of the report, the manifest and the inventory (ADR-005).
 """
@@ -32,7 +35,7 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple, Union
 
 from . import __version__, cards, mhl
 from .errors import IngestError
-from .hashing import CHUNK, DEFAULT_HASH, INSTALL_HINT, MHL_FORMAT_FOR, OFFLOAD_HASHES, MultiHash, available, hash_file, require
+from .hashing import CHUNK, DEFAULT_HASH, INSTALL_HINT, MHL_FORMAT_FOR, OFFLOAD_HASHES, MultiHash, available, hash_file, hash_range, require
 
 MANIFEST_NAME = "ingest-manifest.json"
 MANIFEST_SCHEMA = "ingest/manifest@1"
@@ -48,7 +51,7 @@ class FileRecord:
     size: int
     sha256: Optional[str] = None
     mtime: Optional[str] = None
-    status: str = "pending"        # copied | skipped_identical | conflict | failed | skipped_junk | skipped_symlink | skipped_ascmhl | skipped_manifest | planned
+    status: str = "pending"        # copied | skipped_identical | conflict | failed | growing | skipped_junk | skipped_symlink | skipped_ascmhl | skipped_manifest | planned
     detail: str = ""
     hashes: Dict[str, str] = field(default_factory=dict)   # every digest taken: the offload hash and the ASC MHL format(s)
 
@@ -60,6 +63,7 @@ class DestResult:
     skipped_identical: int = 0
     conflicts: int = 0
     failed: int = 0
+    growing: int = 0                   # files still being written: a verified partial copy, not sealed (--follow, ADR-007)
     manifest: Optional[str] = None
     mhl: Optional[str] = None          # the ASC MHL generation written by this run
     mhl_failed: int = 0                # files whose hash differs from an earlier ASC MHL record (action="failed")
@@ -81,6 +85,7 @@ class OffloadReport:
     finished_at: str = ""
     card: Dict = field(default_factory=dict)   # {"reel": {...}, "name_by": "folder" | "reel"}
     fetch: Optional[Dict] = None               # the download record when the source is an `ingest fetch` staging folder (ADR-005)
+    follow: Optional[Dict] = None              # with --follow: the settle window, the polls and each growing file (ADR-007)
 
     def to_dict(self) -> Dict:
         doc = {"schema": "ingest/offload-report@1", "ok": self.ok, "dry_run": self.dry_run, "source": self.source, "hash": self.hash, "bytes_total": self.bytes_total,
@@ -89,6 +94,8 @@ class OffloadReport:
                "skipped": [asdict(f) for f in self.skipped], "started_at": self.started_at, "finished_at": self.finished_at}
         if self.fetch is not None:
             doc["fetch"] = self.fetch
+        if self.follow is not None:
+            doc["follow"] = self.follow
         return doc
 
 
@@ -409,51 +416,33 @@ def check_destinations(destinations: Iterable[str], hash_algorithm: str, src: Op
     return dests
 
 
-def offload(source: str, destinations: Iterable[str], project: Optional[str] = None, dry_run: bool = False, hash_algorithm: str = DEFAULT_HASH,
-            name_by: str = "folder", reel: Optional[str] = None, fetch: Optional[Dict] = None) -> OffloadReport:
-    """Copy the card folder to each destination as <dest>/<project>/<name>, where name is the source folder's name
-    (name_by="folder", the default) or its reel / card id (name_by="reel", see cards.derive_reel). Every file of the
-    folder is copied unchanged, whatever its card structure. `fetch` is the download record of an `ingest fetch`
-    staging folder (fetch.py): it is written as the "fetch" key of every destination's manifest."""
-    src = Path(source).resolve()
-    if not src.is_dir():
-        raise IngestError("SOURCE_NOT_FOUND", f"source {source} is not a directory")
-    if name_by not in NAME_BY:
-        raise IngestError("REEL_INVALID", f"name_by must be one of {', '.join(NAME_BY)}")
-    check_reel(reel)
-    dests = check_destinations(destinations, hash_algorithm, src)
-    files, skipped = scan(src)
-    reel_info, reel_warnings = card_reel(src, files, reel)
-    name = reel_info["id"] if name_by == "reel" else src.name
-    roots = [d / project / name if project else d / name for d in dests]
-    started = datetime.now(timezone.utc)
-    report = OffloadReport(source=str(src), destinations=[DestResult(root=str(r), warnings=list(reel_warnings)) for r in roots], skipped=skipped, hash=hash_algorithm,
-                           dry_run=dry_run, started_at=started.strftime("%Y-%m-%dT%H:%M:%SZ"), card={"reel": reel_info, "name_by": name_by}, fetch=fetch)
-    mhl_format = MHL_FORMAT_FOR[hash_algorithm]
-    histories: List[mhl.History] = []
-    # Per destination: path -> (status, detail). A file failed on one destination is still listed by the others (ADR-004).
-    per_dest: List[Dict[str, Tuple[str, str]]] = [{} for _ in roots]
-    if not dry_run:
-        src_hist = mhl.read_history(src)
-        for dres, root in zip(report.destinations, roots):
-            root.mkdir(parents=True, exist_ok=True)
-            dres.problems.extend(_carry_history(src_hist, root))
-            histories.append(mhl.read_history(root))
-            dres.problems.extend(p for p in histories[-1].problems if p not in dres.problems)
-    for f in files:
-        rel = f.relative_to(src)
-        st = f.stat()
-        rec = FileRecord(rel.as_posix(), st.st_size, mtime=datetime.fromtimestamp(st.st_mtime, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
-        report.bytes_total += st.st_size
-        if dry_run:
-            rec.status = "planned"
-            report.files.append(rec)
-            continue
-        # The offload hash, the ASC MHL format, and every earlier ASC MHL format for this file that can be computed here.
-        algorithms = {hash_algorithm, mhl_format} | {fmt for h in histories for fmt, _, _ in h.prior(rec.path) if available(fmt)}
-        src_digests, outcome = _offload_file(f, st.st_size, [root / rel for root in roots], algorithms)
+class _Offload:
+    """The per-destination bookkeeping of one offload run, shared by the plain file loop and --follow (follow.py)."""
+
+    def __init__(self, src: Path, roots: List[Path], report: OffloadReport, histories: List["mhl.History"], partials: List[Dict[str, Dict]], retry_changed: bool = False):
+        self.src, self.roots, self.report, self.histories, self.partials = src, roots, report, histories, partials
+        self.hash = report.hash
+        self.mhl_format = MHL_FORMAT_FOR[report.hash]
+        self.retry_changed = retry_changed   # --follow: a file that changed while read is followed, not failed
+        # Per destination: path -> (status, detail). A file failed on one destination is still listed by the others (ADR-004).
+        self.per_dest: List[Dict[str, Tuple[str, str]]] = [{} for _ in roots]
+        # Per destination: path -> the manifest "growing" entry of a partial copy it holds (ADR-007).
+        self.growing: List[Dict[str, Dict]] = [dict(p) for p in partials]
+
+    def algorithms(self, rel: str) -> List[str]:
+        """The offload hash, the ASC MHL format, and every earlier ASC MHL format for this file that can be computed here."""
+        return sorted({self.hash, self.mhl_format} | {fmt for h in self.histories for fmt, _, _ in h.prior(rel) if available(fmt)})
+
+    def dest_paths(self, rel: str) -> List[Path]:
+        return [root / rel for root in self.roots]
+
+    def add_skipped(self, skipped: List[FileRecord]) -> None:
+        have = {s.path for s in self.report.skipped}
+        self.report.skipped.extend(s for s in skipped if s.path not in have)
+
+    def record(self, rec: FileRecord, src_digests: Optional[Dict[str, str]], outcome: Sequence[Tuple[str, str]]) -> None:
         statuses = []
-        for dres, seen, (status, detail) in zip(report.destinations, per_dest, outcome):
+        for dres, seen, (status, detail) in zip(self.report.destinations, self.per_dest, outcome):
             seen[rec.path] = (status, detail)
             statuses.append(status)
             if status == "copied":
@@ -462,19 +451,170 @@ def offload(source: str, destinations: Iterable[str], project: Optional[str] = N
                 dres.skipped_identical += 1
             elif status == "conflict":
                 dres.conflicts += 1
+            elif status == "growing":
+                dres.growing += 1
             else:
                 dres.failed += 1
             if detail:
                 rec.detail = detail
         rec.hashes = src_digests or {}
         rec.sha256 = rec.hashes.get("sha256")
-        rec.status = "failed" if "failed" in statuses else "conflict" if "conflict" in statuses else "copied" if "copied" in statuses else "skipped_identical"
-        report.files.append(rec)
-    if not dry_run:
-        for dres, root, hist, seen in zip(report.destinations, roots, histories, per_dest):
-            dres.manifest = str(write_manifest(root, report, seen))
-            _write_mhl(dres, hist, report, started, seen)
-    report.ok = all(d.failed == 0 and d.conflicts == 0 and d.mhl_failed == 0 and not d.problems for d in report.destinations)
+        rec.status = next((s for s in ("failed", "conflict", "growing", "copied") if s in statuses), "skipped_identical")
+        self.report.bytes_total += rec.size
+        self.report.files.append(rec)
+
+    def copy_file(self, f: Path, rel: str, st: os.stat_result) -> str:
+        """The ordinary path: one read, every destination written and read back (ADR-004). With retry_changed, a file
+        that changed while it was read is not recorded (returns "source_changed"): --follow copies it as it grows."""
+        src_digests, outcome = _offload_file(f, st.st_size, self.dest_paths(rel), self.algorithms(rel))
+        if self.retry_changed and src_digests is None and outcome and all(s == "failed" and "changed while it was being copied" in d for s, d in outcome):
+            return "source_changed"
+        self.record(FileRecord(rel, st.st_size, mtime=_iso(st.st_mtime)), src_digests, outcome)
+        return "recorded"
+
+    def _keep_partials(self, g, mtime: Optional[str]) -> None:
+        from . import follow
+        for i in range(len(self.roots)):
+            e = None if (g.outcome[i] or ("", ""))[0] in ("copied", "skipped_identical") else follow.entry(g, i, mtime)
+            if e is not None:
+                self.growing[i][g.rel] = e
+            else:
+                self.growing[i].pop(g.rel, None)
+
+    def finish_growing(self, g, digests: Optional[Dict[str, str]], st: Optional[os.stat_result], source_failed: bool = False) -> None:
+        """A growing copy that ended: sealed (digests), or failed / conflicting on every destination (st None: the
+        source file is gone)."""
+        mtime = _iso(st.st_mtime) if st is not None else None
+        outcome = [o if o is not None else ("failed", g.detail or "the source could not be read") for o in g.outcome]
+        if digests is not None and g.detail and not source_failed:
+            outcome = [(s, d or g.detail) for s, d in outcome]
+        self._keep_partials(g, mtime)
+        self.record(FileRecord(g.rel, st.st_size if digests is not None and st is not None else g.offset, mtime=mtime), digests, outcome)
+
+    def leave_growing(self, g) -> None:
+        """A file still being written when the run stops: its verified partial copy stays, listed under "growing"."""
+        try:
+            st = g.src.stat()
+            size, mtime = st.st_size, _iso(st.st_mtime)
+        except OSError:
+            size, mtime = g.offset, None
+        detail = f"still being written: {g.offset} of {size} bytes copied and verified (a partial copy, not sealed)" + (f"; {g.detail}" if g.detail else "")
+        outcome = [o if o is not None else ("growing", detail) for o in g.outcome]
+        self._keep_partials(g, mtime)
+        self.record(FileRecord(g.rel, size, mtime=mtime), None, outcome)
+
+    def write_manifests(self, in_progress: Iterable = (), pending: Iterable[str] = ()) -> None:
+        """Every destination's manifest as it stands: the sealed files, and (ADR-007) the partial copies under "growing"."""
+        from . import follow
+        in_progress = list(in_progress)
+        pending = set(pending)
+        for i, (dres, root, seen) in enumerate(zip(self.report.destinations, self.roots, self.per_dest)):
+            growing = dict(self.growing[i])
+            for g in in_progress:
+                if g.rel in pending:
+                    e = follow.entry(g, i, None)
+                    if e is not None:
+                        growing[g.rel] = e
+                    else:
+                        growing.pop(g.rel, None)
+            dres.manifest = str(write_manifest(root, self.report, seen, [growing[k] for k in sorted(growing)]))
+
+    def finalize(self, started: datetime) -> None:
+        self.report.files.sort(key=lambda f: f.path)
+        self.write_manifests()
+        for dres, hist, seen in zip(self.report.destinations, self.histories, self.per_dest):
+            _write_mhl(dres, hist, self.report, started, seen)
+
+
+def _iso(ts: float) -> str:
+    return datetime.fromtimestamp(ts, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def read_partials(root: Path) -> Dict[str, Dict]:
+    """The partial copies an earlier --follow run left in this destination (its manifest's "growing" entries), by path,
+    for those whose file is still there and at least as long as the verified size (ADR-007). Unreadable manifest: none."""
+    try:
+        if not (root / MANIFEST_NAME).is_file():
+            return {}
+        _, doc = load_manifest(str(root))
+    except IngestError:
+        return {}
+    out = {}
+    for e in doc.get("growing", []):
+        f = root / e["path"]
+        if f.is_file() and f.stat().st_size >= e["size"]:
+            out[e["path"]] = e
+    return out
+
+
+def offload(source: str, destinations: Iterable[str], project: Optional[str] = None, dry_run: bool = False, hash_algorithm: str = DEFAULT_HASH,
+            name_by: str = "folder", reel: Optional[str] = None, fetch: Optional[Dict] = None, follow: bool = False,
+            settle_s: Optional[float] = None, poll_s: Optional[float] = None, follow_for_s: Optional[float] = None,
+            clock=None, sleep=None) -> OffloadReport:
+    """Copy the card folder to each destination as <dest>/<project>/<name>, where name is the source folder's name
+    (name_by="folder", the default) or its reel / card id (name_by="reel", see cards.derive_reel). Every file of the
+    folder is copied unchanged, whatever its card structure. `fetch` is the download record of an `ingest fetch`
+    staging folder (fetch.py): it is written as the "fetch" key of every destination's manifest.
+
+    follow=True (ADR-007): files still being written are copied as they grow and sealed once their size and mtime have
+    been unchanged for settle_s seconds; the run polls every poll_s seconds and ends when every file is sealed, after
+    follow_for_s seconds, or on Ctrl-C. clock / sleep replace time.monotonic / time.sleep (tests)."""
+    from . import follow as follow_mod
+    src = Path(source).resolve()
+    if not src.is_dir():
+        raise IngestError("SOURCE_NOT_FOUND", f"source {source} is not a directory")
+    if name_by not in NAME_BY:
+        raise IngestError("REEL_INVALID", f"name_by must be one of {', '.join(NAME_BY)}")
+    check_reel(reel)
+    settle_s = follow_mod.DEFAULT_SETTLE_S if settle_s is None else settle_s
+    poll_s = follow_mod.DEFAULT_POLL_S if poll_s is None else poll_s
+    if settle_s < 0 or poll_s <= 0 or (follow_for_s is not None and follow_for_s < 0):
+        raise IngestError("FOLLOW_INVALID", "--settle and --follow-for must be 0 or more seconds, --poll more than 0")
+    dests = check_destinations(destinations, hash_algorithm, src)
+    files, skipped = scan(src)
+    reel_info, reel_warnings = card_reel(src, files, reel)
+    name = reel_info["id"] if name_by == "reel" else src.name
+    roots = [d / project / name if project else d / name for d in dests]
+    started = datetime.now(timezone.utc)
+    report = OffloadReport(source=str(src), destinations=[DestResult(root=str(r), warnings=list(reel_warnings)) for r in roots], skipped=skipped, hash=hash_algorithm,
+                           dry_run=dry_run, started_at=started.strftime("%Y-%m-%dT%H:%M:%SZ"), card={"reel": reel_info, "name_by": name_by}, fetch=fetch)
+    if dry_run:
+        for f in files:
+            st = f.stat()
+            report.files.append(FileRecord(f.relative_to(src).as_posix(), st.st_size, mtime=_iso(st.st_mtime), status="planned"))
+            report.bytes_total += st.st_size
+        report.finished_at = _now()
+        return report
+    histories: List[mhl.History] = []
+    src_hist = mhl.read_history(src)
+    for dres, root in zip(report.destinations, roots):
+        root.mkdir(parents=True, exist_ok=True)
+        dres.problems.extend(_carry_history(src_hist, root))
+        histories.append(mhl.read_history(root))
+        dres.problems.extend(p for p in histories[-1].problems if p not in dres.problems)
+    ctx = _Offload(src, roots, report, histories, [read_partials(r) for r in roots], retry_changed=follow)
+    if follow:
+        kw = {k: v for k, v in (("clock", clock), ("sleep", sleep)) if v is not None}
+        report.follow = follow_mod.follow(ctx, settle_s, poll_s, follow_for_s, **kw)
+    else:
+        for f in files:
+            rel = f.relative_to(src).as_posix()
+            st = f.stat()
+            g = follow_mod.start(rel, f, ctx.dest_paths(rel), ctx.algorithms(rel), hash_algorithm, ctx.partials, st.st_size) \
+                if any(rel in p for p in ctx.partials) else None
+            if g is None:
+                ctx.copy_file(f, rel, st)
+            elif not follow_mod.grow(g):
+                ctx.finish_growing(g, None, st, source_failed=True)
+            elif g.active() and g.single_read:
+                ctx.finish_growing(g, follow_mod.seal(g), f.stat())
+            elif g.active():   # an earlier --follow run's partial copy, and the source is still being written
+                g.detail = f"SOURCE_CHANGED: {f} is still being written; continue it with --follow"
+                ctx.leave_growing(g)
+            else:
+                ctx.finish_growing(g, None, st)
+    ctx.finalize(started)
+    report.ok = all(d.failed == 0 and d.conflicts == 0 and d.growing == 0 and d.mhl_failed == 0 and not d.problems for d in report.destinations)
     report.finished_at = _now()
     return report
 
@@ -514,9 +654,11 @@ def _write_mhl(dres: DestResult, hist: "mhl.History", report: OffloadReport, sta
         dres.problems.append({"code": "MHL_INVALID", "detail": f"writing the ASC MHL generation failed: {e}"})
 
 
-def write_manifest(root: Path, report: OffloadReport, statuses: Optional[Dict[str, Tuple[str, str]]] = None) -> Path:
+def write_manifest(root: Path, report: OffloadReport, statuses: Optional[Dict[str, Tuple[str, str]]] = None, growing: Sequence[Dict] = ()) -> Path:
     """ingest-manifest.json of one destination: every file it has, verified. With this destination's statuses, the
-    files whose copy failed here are listed under the optional "failed" key, so `verify` reports the copy incomplete."""
+    files whose copy failed here are listed under the optional "failed" key, so `verify` reports the copy incomplete.
+    `growing` (ADR-007): the partial copies of recordings still being written, listed under the optional "growing" key
+    (each with "growing": true, the verified size and the hash of those bytes), never under "files"."""
     algo = report.hash
     entries = [{"path": f.path, "size": f.size, algo: f.hashes[algo], "mtime": f.mtime} for f in report.files
                if algo in f.hashes and _dest_status(f, statuses) in ("copied", "skipped_identical")]
@@ -525,6 +667,8 @@ def write_manifest(root: Path, report: OffloadReport, statuses: Optional[Dict[st
               if statuses is not None and statuses.get(f.path, ("", ""))[0] == "failed"]
     if failed:  # optional, like "card": readers of ingest/manifest@1 that do not know it ignore it
         doc["failed"] = failed
+    if growing:  # optional (ADR-007): never sealed, never in "files" or the ASC MHL
+        doc["growing"] = list(growing)
     if report.card.get("reel"):  # optional: the reel this copy was made under, so inventory keeps an operator-given one
         doc["card"] = {"reel": report.card["reel"]["id"], "reel_source": report.card["reel"]["source"]}
     if report.fetch is not None:  # optional: where a fetched folder came from (ADR-005); redacted, never a cookie
@@ -550,6 +694,9 @@ def load_manifest(target: str) -> Tuple[Path, Dict]:
     doc.setdefault("hash", "sha256")  # every manifest written before xxh64 existed is sha256
     if not isinstance(doc.get("failed", []), list) or any(not isinstance(e, dict) or "path" not in e for e in doc.get("failed", [])):
         raise IngestError("MANIFEST_INVALID", f"{path}: \"failed\" must be a list of {{\"path\", ...}} entries")
+    if not isinstance(doc.get("growing", []), list) or any(not isinstance(e, dict) or "path" not in e or not isinstance(e.get("size"), int) or doc["hash"] not in e
+                                                           for e in doc.get("growing", [])):
+        raise IngestError("MANIFEST_INVALID", f"{path}: \"growing\" must be a list of {{\"path\", \"size\", \"{doc['hash']}\", ...}} entries")
     if doc["hash"] not in OFFLOAD_HASHES or any(doc["hash"] not in e for e in doc.get("files", [])):
         raise IngestError("MANIFEST_INVALID", f"{path}: hash must be one of {', '.join(OFFLOAD_HASHES)} and every file must carry it")
     return path.parent, doc
@@ -590,7 +737,7 @@ def verify(target: str) -> Dict:
             if doc is None and path not in expected:
                 require([fmt for r in recs for fmt in r.hashes])  # refuse: nothing here can check this file
     out: Dict = {"schema": "ingest/verify-report@1", "root": str(root), "hash": doc["hash"] if doc else None, "checked": 0, "ok_files": 0,
-                 "missing": [], "changed": [], "unlisted": [], "copy_failed": [], "failures": [], "warnings": warnings,
+                 "missing": [], "changed": [], "unlisted": [], "copy_failed": [], "growing": [], "failures": [], "warnings": warnings,
                  "mhl": None if hist is None else {"history": str(hist.folder), "generations": len(hist.entries), "problems": hist.problems, "warnings": hist.warnings}}
     for path in sorted(set(expected) | set(sizes)):
         f = root / path
@@ -610,8 +757,30 @@ def verify(target: str) -> Dict:
             out["failures"].extend(bad)
         else:
             out["ok_files"] += 1
+    # Partial copies of recordings still being written (ADR-007): the verified bytes are checked, and the copy is incomplete.
+    growing_paths = set()
+    for e in (doc or {}).get("growing", []):
+        path = e["path"]
+        if path in expected or path in sizes:
+            continue
+        growing_paths.add(path)
+        f = root / path
+        if not f.is_file():
+            out["missing"].append(path)
+            out["failures"].append({"code": "FILE_MISSING", "path": path, "against": MANIFEST_NAME})
+            continue
+        size = f.stat().st_size
+        got = hash_range(f, 0, e["size"], [doc["hash"]])[doc["hash"]] if size >= e["size"] else None
+        if got != e[doc["hash"]]:
+            out["changed"].append(path)
+            out["failures"].append({"code": "VERIFY_MISMATCH", "path": path, "hash": doc["hash"], "expected": e[doc["hash"]], "actual": got, "against": MANIFEST_NAME,
+                                    "detail": f"the first {e['size']} bytes of a partial copy"})
+            continue
+        out["growing"].append(path)
+        out["failures"].append({"code": "INCOMPLETE", "path": path, "against": MANIFEST_NAME,
+                                "detail": f"a partial copy of a recording still being written ({e['size']} bytes verified), not sealed: continue it with offload --follow"})
     found, _ = scan(root)
-    listed = set(expected) | set(sizes)
+    listed = set(expected) | set(sizes) | growing_paths
     out["unlisted"] = sorted(r for r in (f.relative_to(root).as_posix() for f in found) if r not in listed)
     # Files the offload that wrote the manifest failed to copy here (another destination may have them): incomplete.
     for e in (doc or {}).get("failed", []):
@@ -621,7 +790,7 @@ def verify(target: str) -> Dict:
                                     "detail": f"the offload failed to copy this file here: {e.get('detail') or 'no detail recorded'}"})
     if hist is not None:
         out["failures"].extend(hist.problems)
-    out["ok"] = not out["missing"] and not out["changed"] and not out["copy_failed"] and not (hist and hist.problems)
+    out["ok"] = not out["missing"] and not out["changed"] and not out["copy_failed"] and not out["growing"] and not (hist and hist.problems)
     return out
 
 
@@ -674,12 +843,14 @@ def inventory(target: str, reel: Optional[str] = None) -> Dict:
     algo: Optional[str] = None
     recorded: Optional[Dict] = None
     fetched: Optional[Dict] = None
+    growing: set = set()
     if (root / MANIFEST_NAME).is_file():
         _, doc = load_manifest(str(root))
         algo = doc["hash"]
         hashes = {e["path"]: e[algo] for e in doc["files"]}
         recorded = doc.get("card") if isinstance(doc.get("card"), dict) else None
         fetched = doc.get("fetch") if isinstance(doc.get("fetch"), dict) else None
+        growing = {e["path"] for e in doc.get("growing", [])}
     files, _ = scan(root)
     rels = [f.relative_to(root).as_posix() for f in files]
     analysis = cards.analyse(root, rels)
@@ -697,6 +868,7 @@ def inventory(target: str, reel: Optional[str] = None) -> Dict:
         total += facts.get("duration_s") or 0.0
         single = len(members) == 1
         clips.append({"clip_id": c.clip_id, "structure": c.structure, "path": first["path"], "spanned": not single, "incomplete": c.incomplete,
+                      "growing": any(m in growing for m in c.members),
                       "size": sum(m["size"] for m in members),
                       "sha256": first["hash"]["value"] if single and algo == "sha256" and first["hash"] else None,
                       "hash": first["hash"] if single else None,

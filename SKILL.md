@@ -12,6 +12,7 @@ Run `ingest <command> ... --json` (installed by `pip install -e .`). Every comma
 | Copy a card to two drives | `ingest offload /Volumes/CARD_A --dest /Volumes/SSD1/Footage --dest /Volumes/SSD2/Footage --project 2026-10-30_event --json` |
 | See what would be copied | add `--dry-run` (writes nothing) |
 | Use xxHash64 instead of sha256 | add `--hash xxh64` (needs `pip install -e ".[xxhash]"`; check with `ingest doctor --json`) |
+| Offload a recording still being written | add `--follow` (sealed once unchanged for `--settle` seconds, default 30; `--follow-for 60` to stop after a minute and leave partial copies) |
 | Re-check a backup | `ingest verify /Volumes/SSD1/Footage/2026-10-30_event/CARD_A --json` |
 | Clip list | `ingest inventory /Volumes/SSD1/Footage/2026-10-30_event/CARD_A --json` |
 | Name the copy after the card's reel | add `--name-by reel` to offload (`--reel B007` to set it yourself) |
@@ -29,6 +30,7 @@ Run `ingest <command> ... --json` (installed by `pip install -e .`). Every comma
 - Every file of the card is copied unchanged, whatever its structure: sidecars, index files, playlists and proxies are needed by NLEs, so never copy only the media files.
 - Card housekeeping (`.DS_Store`, `._*`, `.Spotlight-V100`, `System Volume Information`, ...) and symbolic links are listed as skipped, never copied or followed.
 - A destination inside the source (or the other way round), the same destination twice, or no destination is refused before anything is written (exit 2).
+- With `--follow`, a file still being recorded is copied as it grows (new bytes only, each range read back) and listed under `growing` in the manifest; it is sealed (manifest `files`, ASC MHL) only once its size and mtime have been unchanged for the settle window. A partial copy is never in the ASC MHL.
 - `fetch` downloads one video into a staging folder, then copies it exactly like a card (read-back, manifest, ASC MHL), so `verify` and `inventory` work on it. The manifest's `fetch` record holds the source URL with credentials removed (userinfo, token / signature / key / password-like parameter values), the extractor, the yt-dlp version, the selected `format_id` and the times; never cookies or request headers.
 
 ## Rights
@@ -47,6 +49,7 @@ Exit codes: `0` ok, `2` refused (including `HASH_UNAVAILABLE`: xxh64 without the
 - `inventory` lists recordings, not files: a `spanned` clip's `members` are one recording in order; an `incomplete` one continues on another card. Report the clip count from `clip_count`, and the reel with its `source` (`operator`, `manifest`, `clip_names`, `fingerprint`); a `fingerprint` reel is not a camera reel.
 - Sidecar `metadata` holds only what the camera wrote; a missing key is unknown. `warnings` (a clip missing from MEDIAPRO.XML, an unreadable playlist or sidecar) are card-health notes to pass on.
 - `inventory` reads clip facts with `ffprobe`. When `probed` is false the facts are **unknown**, not zero (ffprobe missing, or a file it cannot read).
+- A `growing` file (offload status, `destinations[].growing`, verify `growing`, inventory `"growing": true`) is a verified **partial** copy of a recording still in progress: say it can be edited but is not a finished backup, and that re-running `offload --follow` (or a plain offload once recording has ended) completes and seals it. Never call it verified.
 - Two copies on the same physical drive are not a backup; say so if both destinations are on one volume.
 
 ## Not this skill's job
