@@ -12,6 +12,7 @@ Run `ingest <command> ... --json` (installed by `pip install -e .`). Every comma
 | Copy a card to two drives | `ingest offload /Volumes/CARD_A --dest /Volumes/SSD1/Footage --dest /Volumes/SSD2/Footage --project 2026-10-30_event --json` |
 | See what would be copied | add `--dry-run` (writes nothing) |
 | Use xxHash64 instead of sha256 | add `--hash xxh64` (needs `pip install -e ".[xxhash]"`; check with `ingest doctor --json`) |
+| Make editing proxies during the offload | add `--proxy` (needs ffmpeg-skill; check `ffmpeg-skill` in `ingest doctor --json`) |
 | Show progress, speed and time left | add `--progress` to offload (JSON lines on stderr: `bytes_done` / `bytes_total`, `eta_s`, `destinations[].mb_s`; a `slow_destination` event names a slow drive) |
 | Offload a recording still being written | add `--follow` (sealed once unchanged for `--settle` seconds, default 30; `--follow-for 60` to stop after a minute and leave partial copies) |
 | Re-check a backup | `ingest verify /Volumes/SSD1/Footage/2026-10-30_event/CARD_A --json` |
@@ -54,8 +55,9 @@ Exit codes: `0` ok, `2` refused (including `HASH_UNAVAILABLE`: xxh64 without the
 - A `growing` file (offload status, `destinations[].growing`, verify `growing`, inventory `"growing": true`) is a verified **partial** copy of a recording still in progress: say it can be edited but is not a finished backup, and that re-running `offload --follow` (or a plain offload once recording has ended) completes and seals it. Never call it verified.
 - A `sync_group` is a **candidate** from the devices' clocks (`basis`: timecode, utc or local), not a measured sync: pass its `next` call to ffmpeg-skill `multicam` (or `sync`) and report the offsets that measures. `sync` facts that are null are unknown; `ltc.checked: false` means the audio was not analysed (no ffmpeg), not that there is no LTC.
 - A `slow_destination` warning (or one in `destinations[].warnings`) names the drive that sets the pace: say which one and suggest another port, cable or drive; it is not a failure. `eta_s` is an estimate from the rate so far (null with `--follow`).
+- `proxy.failed` items are proxies that ffmpeg-skill could not make: the copies are still verified (`ok` is about the copies only); name the clips and the error. `proxy.encoder` is `hw` only when ffmpeg-skill's own doctor reported a hardware encoder its tools can use (VideoToolbox); otherwise say it ran on the CPU.
 - Two copies on the same physical drive are not a backup; say so if both destinations are on one volume.
 
 ## Not this skill's job
 
-Playlists, logins / cookies and DRM-protected media in `fetch`; editing or transcoding (video-editing-skill / ffmpeg-skill), proxies (ffmpeg-skill `proxy`), cloud upload (publish-skill), deleting or formatting the card, ASC MHL directory hashes / rename / flatten / collections (not yet), P2 / Canon XF / RED structures (listed as generic files).
+Playlists, logins / cookies and DRM-protected media in `fetch`; editing or transcoding (video-editing-skill / ffmpeg-skill), encoding proxies (ffmpeg-skill `proxy`; `offload --proxy` only queues it), cloud upload (publish-skill), deleting or formatting the card, ASC MHL directory hashes / rename / flatten / collections (not yet), P2 / Canon XF / RED structures (listed as generic files).

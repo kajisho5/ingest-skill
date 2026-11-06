@@ -367,7 +367,7 @@ class InventoryAndContractTests(unittest.TestCase):
         self.assertEqual(len({p["id"] for p in c["provides"]}), len(c["provides"]))
         for d in c["dependencies"]:
             self.assertTrue(d.get("skill_id") and d.get("version_range"), d)
-        self.assertEqual([o["id"] for o in c["capabilities"]["optional"]], ["ffprobe", "ffmpeg", "xxhash", "yt-dlp"])
+        self.assertEqual([o["id"] for o in c["capabilities"]["optional"]], ["ffprobe", "ffmpeg", "ffmpeg-skill", "xxhash", "yt-dlp"])
         for code in ("SOURCE_CHANGED", "VERIFY_MISMATCH", "HASH_UNAVAILABLE", "FILE_MISSING", "MHL_INVALID", "FETCH_UNAVAILABLE", "FETCH_FAILED", "URL_INVALID"):
             self.assertIn(code, c["errors"])
 

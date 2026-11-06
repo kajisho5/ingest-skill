@@ -5,7 +5,7 @@ Written from a read-only audit of this repository on 2026-10-30. Each step below
 
 ## Where it stands
 
-v0.1.0 on main, SKILL.md on the default branch. Python 3.9+ stdlib (`xxhash` and `yt-dlp` optional). `ingest offload | verify | inventory | fetch | contract | doctor`; sha256 or xxh64 read-back, never overwrites, resumable, manifest and ASC MHL history per destination; card-structure-aware inventory (one clip per recording, camera sidecars, reel / card id, ADR-003); the source read once for every destination (ADR-004); `ingest fetch <url>` downloads through yt-dlp and offloads like a card, with a redacted download record (ADR-005); `offload --follow` copies recordings still being written as they grow and seals each once it is stable (ADR-007); inventory carries sync facts per clip and groups several cards into multicam sync-group candidates (ADR-008); `offload --progress` reports bytes, per-drive speed and ETA as JSON lines and warns about a slow destination (ADR-009). 81 tests, CI on 3 OSes × Python 3.9 / 3.11 / 3.12 (3.9 on ubuntu-24.04, see ADR-002), contract validated against the OS schema in CI.
+v0.1.0 on main, SKILL.md on the default branch. Python 3.9+ stdlib (`xxhash` and `yt-dlp` optional). `ingest offload | verify | inventory | fetch | contract | doctor`; sha256 or xxh64 read-back, never overwrites, resumable, manifest and ASC MHL history per destination; card-structure-aware inventory (one clip per recording, camera sidecars, reel / card id, ADR-003); the source read once for every destination (ADR-004); `ingest fetch <url>` downloads through yt-dlp and offloads like a card, with a redacted download record (ADR-005); `offload --follow` copies recordings still being written as they grow and seals each once it is stable (ADR-007); inventory carries sync facts per clip and groups several cards into multicam sync-group candidates (ADR-008); `offload --progress` reports bytes, per-drive speed and ETA as JSON lines and warns about a slow destination (ADR-009); `offload --proxy` queues ffmpeg-skill `proxy` on verified clips and links each proxy by hash (ADR-010). 88 tests, CI on 3 OSes × Python 3.9 / 3.11 / 3.12 (3.9 on ubuntu-24.04, see ADR-002), contract validated against the OS schema in CI.
 
 ## What this repository owns
 
@@ -20,7 +20,7 @@ v0.1.0 on main, SKILL.md on the default branch. Python 3.9+ stdlib (`xxhash` and
 
 ## Wiring
 
-The agent's adapter runs `offload` / `inventory` (step 6, video-production-agent#83) and `fetch` (its ADR-059). Calls ffprobe directly; proxies stay with ffmpeg-skill `proxy`.
+The agent's adapter runs `offload` / `inventory` (step 6, video-production-agent#83) and `fetch` (its ADR-059). Calls ffprobe (and, for LTC detection, ffmpeg) directly; proxy encoding stays with ffmpeg-skill `proxy`, which `offload --proxy` runs as a subprocess (ADR-010). The agent pins this contract at 0.1.0: the new optional flags of steps 8–11 in the `offload` / `inventory` argv are a re-pin on its side.
 
 ## Steps
 
@@ -51,9 +51,10 @@ The agent's adapter runs `offload` / `inventory` (step 6, video-production-agent
   - なぜ要るか：現場で「あと何分で取り込みが終わるか」と遅いドライブがすぐ分かる
   - Done when: a fixture run emits monotonic progress, and a throttled destination raises the warning
   - Done (ADR-009): every destination's writer times its own writes and syncs, so `destinations[].write_mb_s` is the drive's speed (the copy itself runs at the slowest one's pace); a destination under half the median speed of all, judged once each has written 64 MB, gets one `slow_destination` warning while the copy runs (also in its `warnings`, never a failure). `offload --progress` writes JSON lines to stderr (`start`, `progress`, `file`, `slow_destination`, `done`) with `bytes_done` (monotonic, ends at `bytes_total`), files, MB/s, `eta_s` and per-destination speeds; stdout stays the one report
-- [ ] **11. Proxies queued at ingest** — after a clip is verified, ffmpeg-skill `proxy` runs on it (a hardware encoder when doctor reports one) while the next files copy; the proxy and its original are linked in the inventory by hash
+- [x] **11. Proxies queued at ingest** — after a clip is verified, ffmpeg-skill `proxy` runs on it (a hardware encoder when doctor reports one) while the next files copy; the proxy and its original are linked in the inventory by hash ([#18](https://github.com/kajisho5/ingest-skill/pull/18), ADR-010)
   - なぜ要るか：撮って出しで、カード取り込みが終わった時点でノートPCで編集できる軽い素材が揃う
   - Done when: an offload with `--proxy` gives one proxy per clip linked by the original's hash; a failed proxy does not fail the offload
+  - Done (ADR-010): `offload --proxy [--ffmpeg-skill DIR] [--proxy-width PX]` queues ffmpeg-skill `scripts/proxy.py` for each verified video member of the card's clips, from the first verified copy, in one worker thread while the next files copy; proxies go to `<copy>/ingest-proxies/` with `proxies.json` (`ingest/proxies@1`: original hash, proxy sha256, encoder, ffmpeg-skill version) and `inventory` links them by the original's manifest hash (`ingest_proxies`). A failed proxy is a warning, never a failed offload; a resume keeps proxies already made; no ffmpeg-skill is `PROXY_UNAVAILABLE`. `--hw` is passed when ffmpeg-skill's doctor reports `hw.platform_ok` (VideoToolbox, the only hardware path its tools take; its NVENC / QSV / VAAPI / AMF `gpu_encoders` are listed, not used). Tested with a stand-in ffmpeg-skill and once with the real 3.1.8 on CPU; VideoToolbox not exercised (no Apple Silicon machine)
 
 ## Boundaries
 

@@ -34,7 +34,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple, Union
 
-from . import __version__, cards, mhl, sync
+from . import __version__, cards, mhl, proxies, sync
 from .progress import DestStats, Progress
 from .errors import IngestError
 from .hashing import CHUNK, DEFAULT_HASH, INSTALL_HINT, MHL_FORMAT_FOR, OFFLOAD_HASHES, MultiHash, available, hash_file, hash_range, require
@@ -53,7 +53,7 @@ class FileRecord:
     size: int
     sha256: Optional[str] = None
     mtime: Optional[str] = None
-    status: str = "pending"        # copied | skipped_identical | conflict | failed | growing | skipped_junk | skipped_symlink | skipped_ascmhl | skipped_manifest | planned
+    status: str = "pending"        # copied | skipped_identical | conflict | failed | growing | skipped_junk | skipped_symlink | skipped_ascmhl | skipped_proxies | skipped_manifest | planned
     detail: str = ""
     hashes: Dict[str, str] = field(default_factory=dict)   # every digest taken: the offload hash and the ASC MHL format(s)
 
@@ -90,6 +90,7 @@ class OffloadReport:
     card: Dict = field(default_factory=dict)   # {"reel": {...}, "name_by": "folder" | "reel"}
     fetch: Optional[Dict] = None               # the download record when the source is an `ingest fetch` staging folder (ADR-005)
     follow: Optional[Dict] = None              # with --follow: the settle window, the polls and each growing file (ADR-007)
+    proxy: Optional[Dict] = None               # with --proxy: ffmpeg-skill proxy runs, one per verified video file (ADR-010)
 
     def to_dict(self) -> Dict:
         doc = {"schema": "ingest/offload-report@1", "ok": self.ok, "dry_run": self.dry_run, "source": self.source, "hash": self.hash, "bytes_total": self.bytes_total,
@@ -100,6 +101,8 @@ class OffloadReport:
             doc["fetch"] = self.fetch
         if self.follow is not None:
             doc["follow"] = self.follow
+        if self.proxy is not None:
+            doc["proxy"] = self.proxy
         return doc
 
 
@@ -138,7 +141,9 @@ def scan(source: Path) -> Tuple[List[Path], List[FileRecord]]:
                 skipped.append(FileRecord(p.relative_to(source).as_posix(), 0, status="skipped_symlink", detail="symbolic links are not followed"))
             elif top and name == mhl.FOLDER:
                 skipped.append(FileRecord(name, 0, status="skipped_ascmhl", detail="ASC MHL history: carried into each destination's ascmhl/ history, not copied as media"))
-        dirnames[:] = sorted(n for n in dirnames if not (d / n).is_symlink() and not _is_junk((d / n).relative_to(source)) and not (top and n == mhl.FOLDER))
+            elif top and name == proxies.FOLDER:
+                skipped.append(FileRecord(name, 0, status="skipped_proxies", detail="proxies made by offload --proxy (ADR-010): not media of this folder, not copied"))
+        dirnames[:] = sorted(n for n in dirnames if not (d / n).is_symlink() and not _is_junk((d / n).relative_to(source)) and not (top and n in (mhl.FOLDER, proxies.FOLDER)))
         for name in sorted(filenames):
             p = d / name
             rel = p.relative_to(source)
@@ -447,6 +452,8 @@ class _Offload:
         # Per destination: path -> the manifest "growing" entry of a partial copy it holds (ADR-007).
         self.growing: List[Dict[str, Dict]] = [dict(p) for p in partials]
         self.progress: Optional[Progress] = None   # bytes, speeds and the slow-destination warning (ADR-009)
+        self.proxies: Optional["proxies.ProxyQueue"] = None   # offload --proxy (ADR-010)
+        self.proxy_members: set = set()            # the video files of the card's clips, which get a proxy
 
     def algorithms(self, rel: str) -> List[str]:
         """The offload hash, the ASC MHL format, and every earlier ASC MHL format for this file that can be computed here."""
@@ -484,6 +491,10 @@ class _Offload:
         if self.progress is not None:
             p = self.progress
             p.file_done(rec.path, rec.size, rec.status, p.file_bytes if p.file == rec.path else 0)
+        if self.proxies is not None and rec.path in self.proxy_members and self.hash in rec.hashes:
+            verified = next((i for i, (s, _) in enumerate(outcome) if s in ("copied", "skipped_identical")), None)
+            if verified is not None:   # made from a verified copy, never from the card, while the next files copy
+                self.proxies.submit(self.roots[verified], rec.path, rec.hashes[self.hash])
 
     def copy_file(self, f: Path, rel: str, st: os.stat_result) -> str:
         """The ordinary path: one read, every destination written and read back (ADR-004). With retry_changed, a file
@@ -574,7 +585,8 @@ def read_partials(root: Path) -> Dict[str, Dict]:
 def offload(source: str, destinations: Iterable[str], project: Optional[str] = None, dry_run: bool = False, hash_algorithm: str = DEFAULT_HASH,
             name_by: str = "folder", reel: Optional[str] = None, fetch: Optional[Dict] = None, follow: bool = False,
             settle_s: Optional[float] = None, poll_s: Optional[float] = None, follow_for_s: Optional[float] = None,
-            clock=None, sleep=None, progress=None, progress_interval_s: Optional[float] = None, slow_min_bytes: Optional[int] = None) -> OffloadReport:
+            clock=None, sleep=None, progress=None, progress_interval_s: Optional[float] = None, slow_min_bytes: Optional[int] = None,
+            proxy: bool = False, ffmpeg_skill: Optional[str] = None, proxy_width: Optional[int] = None) -> OffloadReport:
     """Copy the card folder to each destination as <dest>/<project>/<name>, where name is the source folder's name
     (name_by="folder", the default) or its reel / card id (name_by="reel", see cards.derive_reel). Every file of the
     folder is copied unchanged, whatever its card structure. `fetch` is the download record of an `ingest fetch`
@@ -586,7 +598,11 @@ def offload(source: str, destinations: Iterable[str], project: Optional[str] = N
 
     progress (ADR-009): a callable given one event dict at a time (start, progress, file, slow_destination, done); the
     CLI's --progress writes them as JSON lines to stderr. Every run measures each destination's write speed and warns
-    (DestResult.warnings) when one writes at under half the destinations' median speed."""
+    (DestResult.warnings) when one writes at under half the destinations' median speed.
+
+    proxy=True (ADR-010): each verified video file of the card's clips is queued for ffmpeg-skill proxy (found at
+    ffmpeg_skill, $INGEST_FFMPEG_SKILL_DIR or ~/.claude/skills/ffmpeg-skill), made from the first verified copy into
+    <destination>/ingest-proxies/ while the next files copy. A failed proxy is reported, never a failed offload."""
     from . import follow as follow_mod
     src = Path(source).resolve()
     if not src.is_dir():
@@ -598,7 +614,10 @@ def offload(source: str, destinations: Iterable[str], project: Optional[str] = N
     poll_s = follow_mod.DEFAULT_POLL_S if poll_s is None else poll_s
     if settle_s < 0 or poll_s <= 0 or (follow_for_s is not None and follow_for_s < 0):
         raise IngestError("FOLLOW_INVALID", "--settle and --follow-for must be 0 or more seconds, --poll more than 0")
+    if proxy_width is not None and proxy_width <= 0:
+        raise IngestError("PROXY_UNAVAILABLE", "--proxy-width must be more than 0 pixels")
     dests = check_destinations(destinations, hash_algorithm, src)
+    skill = proxies.require_skill(ffmpeg_skill) if proxy else None
     files, skipped = scan(src)
     reel_info, reel_warnings = card_reel(src, files, reel)
     name = reel_info["id"] if name_by == "reel" else src.name
@@ -624,6 +643,16 @@ def offload(source: str, destinations: Iterable[str], project: Optional[str] = N
     kw_p = {k: v for k, v in (("interval_s", progress_interval_s), ("slow_min_bytes", slow_min_bytes)) if v is not None}
     ctx.progress = Progress([str(r) for r in roots], sum(f.stat().st_size for f in files), len(files), emit=progress, eta=not follow, **kw_p)
     ctx.progress.start()
+    if skill is not None:
+        rels = [f.relative_to(src).as_posix() for f in files]
+        ctx.proxies = proxies.ProxyQueue(skill, hash_algorithm, proxy_width)
+        for c in cards.analyse(src, rels, parse=False).clips:
+            for m in c.members:
+                ok_, why = proxies.eligible(m)
+                if ok_:
+                    ctx.proxy_members.add(m)
+                elif m.lower().endswith(tuple(proxies.NOT_DECODABLE)):
+                    ctx.proxies.skip(m, why)
     if follow:
         kw = {k: v for k, v in (("clock", clock), ("sleep", sleep)) if v is not None}
         report.follow = follow_mod.follow(ctx, settle_s, poll_s, follow_for_s, **kw)
@@ -644,6 +673,12 @@ def offload(source: str, destinations: Iterable[str], project: Optional[str] = N
                 ctx.leave_growing(g)
             else:
                 ctx.finish_growing(g, None, st)
+    if ctx.proxies is not None:
+        report.proxy = ctx.proxies.close()
+        for item in report.proxy["items"]:
+            if item["status"] == "failed":
+                dres = next((d for d in report.destinations if d.root == item.get("root")), report.destinations[0])
+                dres.warnings.append(f"proxy of {item['original']} failed (the copy is verified; the offload is not affected): {item['detail']}")
     ctx.finalize(started)
     for i, (dres, stats) in enumerate(zip(report.destinations, ctx.progress.dests)):
         dres.bytes_written, dres.write_mb_s = stats.bytes, stats.mb_s()
@@ -897,6 +932,7 @@ def inventory(target: str, reel: Optional[str] = None) -> Dict:
     recorded: Optional[Dict] = None
     fetched: Optional[Dict] = None
     growing: set = set()
+    made = proxies.read_index(root)
     if (root / MANIFEST_NAME).is_file():
         _, doc = load_manifest(str(root))
         algo = doc["hash"]
@@ -928,6 +964,11 @@ def inventory(target: str, reel: Optional[str] = None) -> Dict:
                       "members": [{k: m[k] for k in ("path", "size", "hash", "probed", "duration_s") if k in m} for m in members],
                       "sidecars": c.sidecars, "proxies": c.proxies, "related": c.related, "metadata": c.metadata, **facts})
         clips[-1]["sync"] = sync.clip_sync(root, clips[-1], _ffprobe(root / first["path"]))
+        # offload --proxy (ADR-010): proxies linked by the original's hash, as the manifest records it.
+        clips[-1]["ingest_proxies"] = [{"member": m, "path": e["path"], "exists": (root / e["path"]).is_file(), "size": e.get("size"), "sha256": e.get("sha256"),
+                                        "original_hash": e["original_hash"], "encoder": e.get("encoder")}
+                                       for m in c.members if m in hashes for e in made
+                                       if e["original_hash"].get("algorithm") == algo and e["original_hash"].get("value") == hashes[m]]
     return {"schema": "ingest/inventory@2", "root": str(root),
             "card": {"reel": reel_info, "structures": analysis.structures, "index_files": analysis.index_files},
             "clips": clips, "clip_count": len(clips), "file_count": sum(len(c["members"]) for c in clips),
@@ -967,7 +1008,8 @@ def doctor() -> Dict:
               "ffprobe": {"status": "ok" if ffprobe else "degraded", "detail": ffprobe or "not on PATH: inventory facts will be unknown; offload and verify do not need it"},
               "ffmpeg": {"status": "ok" if shutil.which("ffmpeg") else "degraded",
                          "detail": shutil.which("ffmpeg") or "not on PATH: inventory does not look for LTC in the audio of video files (WAV files are still checked); offload and verify do not need it"},
-              "yt-dlp": fetch_check()}
+              "yt-dlp": fetch_check(),
+              "ffmpeg-skill": proxies.check()}
     return {"schema": "ingest/doctor@1", "ok": all(c["status"] != "fail" for c in checks.values()), "checks": checks,
             "hash_algorithms": {a: "ok" if available(a) else "unavailable" for a in OFFLOAD_HASHES + ("c4", "md5", "sha1", "xxh3", "xxh128")},
             "version": __version__, "measured_at": _now()}
