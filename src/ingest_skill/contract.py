@@ -90,8 +90,8 @@ def contract() -> Dict[str, Any]:
         "tools": TOOLS,
         "execution": {"canonical_invocation": ["ingest", "<command>", "...", "--json"], "network": True, "network_tools": ["ingest/fetch"], "shell": False,
                       "source_is_read_only": True, "overwrites": "never: identical files are skipped, different ones are conflicts"},
-        "manifest": {"name": "ingest-manifest.json", "schema": "ingest/manifest@1", "hash": ["sha256", "xxh64"], "default_hash": "sha256",
-                     "optional_keys": ["failed", "growing", "card", "fetch"]},
+        # "manifest" and "inventory" are kept as consumers pinned them; what later steps added has keys of its own below.
+        "manifest": {"name": "ingest-manifest.json", "schema": "ingest/manifest@1", "hash": ["sha256", "xxh64"], "default_hash": "sha256"},
         # offload --progress (ADR-009): JSON lines on stderr; stdout stays the one report document.
         "progress": {"stream": "stderr", "format": "JSON lines", "events": ["start", "progress", "file", "slow_destination", "done"],
                      "fields": ["bytes_done", "bytes_total", "files_done", "files_total", "mb_s", "eta_s", "elapsed_s", "file", "file_bytes", "file_size",
@@ -99,19 +99,18 @@ def contract() -> Dict[str, Any]:
                      "slow_destination": "a destination writing at under 50% of the destinations' median write speed, judged once each has written 64 MB; also in destinations[].warnings",
                      "destination_speed": "bytes written / time spent writing and syncing them (the drive's own speed, not the shared pace)"},
         # offload --follow (ADR-007): recordings still being written are copied as they grow and sealed once stable.
-        "follow": {"report_key": "follow", "manifest_key": "growing", "seal_when": "size and mtime unchanged for the settle window",
+        "follow": {"report_key": "follow", "manifest_key": "growing", "manifest_optional_keys": ["failed", "growing", "card", "fetch"], "seal_when": "size and mtime unchanged for the settle window",
                    "default_settle_s": 30, "default_poll_s": 2, "copies": "appended bytes only, each appended range read back",
                    "not_detected": "whether the recorder still holds the file open (no portable API)"},
         "asc_mhl": {"spec": "ASC MHL v1.0 (XML version 2.0)", "folder": "ascmhl", "chain": "ascmhl_chain.xml", "process": "transfer",
                     "recorded_format": {"sha256": "c4", "xxh64": "xxh64"}, "verified_formats": ["c4", "md5", "sha1", "xxh64", "xxh3", "xxh128"]},
         "inventory": {"schema": "ingest/inventory@2", "structures": ["sony_xdcam", "sony_xdcam_ex", "avchd", "blackmagic_raw", "generic"],
-                      "reel_precedence": ["operator", "manifest", "clip_names", "fingerprint"],
-                      # Roadmap step 9 (ADR-008): per clip "sync"; several folders give ingest/inventory-set@1 with sync_groups.
-                      "set_schema": "ingest/inventory-set@1",
-                      "sync": {"facts": ["start_timecode", "start_tod_s", "frame_rate", "timecode_rate", "ltc", "device", "wall_clock_start", "duration_s"],
+                      "reel_precedence": ["operator", "manifest", "clip_names", "fingerprint"]},
+        # Roadmap step 9 (ADR-008): per inventory clip "sync"; several folders give ingest/inventory-set@1 with sync_groups.
+        "sync": {"clip_key": "sync", "set_schema": "ingest/inventory-set@1", "facts": ["start_timecode", "start_tod_s", "frame_rate", "timecode_rate", "ltc", "device", "wall_clock_start", "duration_s"],
                                "sources": ["ffprobe", "sony_nonrealtimemeta", "bwf_bext", "ixml", "wav_data_chunk", "container_creation_time"],
                                "ltc": "detected (biphase-mark signal), never decoded; WAV with the standard library, other files with ffmpeg when on PATH",
-                               "group_bases": ["timecode", "utc", "local"], "group_for": "ffmpeg-skill multicam / sync (scripts/multicam.py)"}},
+                 "group_bases": ["timecode", "utc", "local"], "group_for": "ffmpeg-skill multicam / sync (scripts/multicam.py)"},
         "fetch": {"schema": "ingest/fetch@1", "downloader": "yt-dlp (library, optional extra)", "manifest_key": "fetch",
                   "recorded": ["source_url", "webpage_url", "redacted", "extractor", "extractor_key", "downloader", "format_selector", "format_id",
                                "id", "title", "duration", "is_live", "was_live", "live_from_start", "files", "started_at", "fetched_at"],

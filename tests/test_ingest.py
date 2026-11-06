@@ -371,6 +371,14 @@ class InventoryAndContractTests(unittest.TestCase):
         for code in ("SOURCE_CHANGED", "VERIFY_MISMATCH", "HASH_UNAVAILABLE", "FILE_MISSING", "MHL_INVALID", "FETCH_UNAVAILABLE", "FETCH_FAILED", "URL_INVALID"):
             self.assertIn(code, c["errors"])
 
+    def test_contract_manifest_and_inventory_keys_stay_as_consumers_pinned_them(self):
+        # video-production-agent pins these two values (a change is fatal drift there); later additions get keys of their own.
+        c = contract()
+        self.assertEqual(c["manifest"], {"name": "ingest-manifest.json", "schema": "ingest/manifest@1", "hash": ["sha256", "xxh64"], "default_hash": "sha256"})
+        self.assertEqual(c["inventory"], {"schema": "ingest/inventory@2", "structures": ["sony_xdcam", "sony_xdcam_ex", "avchd", "blackmagic_raw", "generic"],
+                                          "reel_precedence": ["operator", "manifest", "clip_names", "fingerprint"]})
+        self.assertEqual((c["follow"]["manifest_key"], c["sync"]["set_schema"]), ("growing", "ingest/inventory-set@1"))
+
     def test_contract_validates_against_the_os_json_schema(self):
         # ECOSYSTEM_ROADMAP.md step 1: `ingest contract --json` against the OS registry/capability_contract.schema.json.
         # jsonschema is not a dependency: without it (or without the schema) this skips, unless
