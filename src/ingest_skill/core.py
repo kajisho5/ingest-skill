@@ -33,7 +33,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple, Union
 
-from . import __version__, cards, mhl
+from . import __version__, cards, mhl, sync
 from .errors import IngestError
 from .hashing import CHUNK, DEFAULT_HASH, INSTALL_HINT, MHL_FORMAT_FOR, OFFLOAD_HASHES, MultiHash, available, hash_file, hash_range, require
 
@@ -794,7 +794,24 @@ def verify(target: str) -> Dict:
     return out
 
 
+_PROBES: Dict[Tuple[str, int, int], Optional[Dict]] = {}
+
+
 def _ffprobe(path: Path) -> Optional[Dict]:
+    """ffprobe's JSON for path, cached per (path, size, mtime) so that the clip facts and the sync facts share one run."""
+    try:
+        st = path.stat()
+        key = (str(path), st.st_size, st.st_mtime_ns)
+    except OSError:
+        return None
+    if key not in _PROBES:
+        if len(_PROBES) > 4096:
+            _PROBES.clear()
+        _PROBES[key] = _run_ffprobe(path)
+    return _PROBES[key]
+
+
+def _run_ffprobe(path: Path) -> Optional[Dict]:
     exe = shutil.which("ffprobe")
     if not exe:
         return None
@@ -874,12 +891,31 @@ def inventory(target: str, reel: Optional[str] = None) -> Dict:
                       "hash": first["hash"] if single else None,
                       "members": [{k: m[k] for k in ("path", "size", "hash", "probed", "duration_s") if k in m} for m in members],
                       "sidecars": c.sidecars, "proxies": c.proxies, "related": c.related, "metadata": c.metadata, **facts})
+        clips[-1]["sync"] = sync.clip_sync(root, clips[-1], _ffprobe(root / first["path"]))
     return {"schema": "ingest/inventory@2", "root": str(root),
             "card": {"reel": reel_info, "structures": analysis.structures, "index_files": analysis.index_files},
             "clips": clips, "clip_count": len(clips), "file_count": sum(len(c["members"]) for c in clips),
             "spanned_count": sum(1 for c in clips if c["spanned"]), "total_duration_s": round(total, 3),
             "warnings": reel_warnings + analysis.warnings, "fetch": fetched,
             "probe": "ffprobe" if shutil.which("ffprobe") else "unavailable (facts are unknown, not zero)", "generated_at": _now()}
+
+
+def inventory_set(targets: Sequence[str]) -> Dict:
+    """The inventories of several cards (or offloaded folders) of one shoot, and the sync-group candidates among their
+    clips: clips of different cards whose times overlap (sync.py, ADR-008). Reads only."""
+    if len(targets) < 2:
+        raise IngestError("SOURCE_NOT_FOUND", "an inventory set needs two or more folders")
+    roots = [Path(t).resolve() for t in targets]
+    if len(set(roots)) != len(roots):
+        raise IngestError("DUPLICATE_SOURCE", "the same folder was given twice")
+    for a in roots:
+        for b in roots:
+            if a != b and _inside(a, b):
+                raise IngestError("DUPLICATE_SOURCE", f"{a} is inside {b}: give each card folder once")
+    cards_ = [inventory(t) for t in targets]
+    groups = sync.sync_groups(cards_)
+    return {"schema": "ingest/inventory-set@1", "cards": cards_, "card_count": len(cards_), "clip_count": sum(c["clip_count"] for c in cards_),
+            "sync_groups": groups, "min_overlap_s": sync.MIN_OVERLAP_S, "generated_at": _now()}
 
 
 def doctor() -> Dict:
@@ -893,6 +929,8 @@ def doctor() -> Dict:
                          "detail": "xxh64 / xxh3 / xxh128 available" if available("xxh64") else
                          f"optional package not installed: --hash xxh64 is UNAVAILABLE (refused, nothing written) and xxh3 / xxh128 ASC MHL records are not checked; {INSTALL_HINT}"},
               "ffprobe": {"status": "ok" if ffprobe else "degraded", "detail": ffprobe or "not on PATH: inventory facts will be unknown; offload and verify do not need it"},
+              "ffmpeg": {"status": "ok" if shutil.which("ffmpeg") else "degraded",
+                         "detail": shutil.which("ffmpeg") or "not on PATH: inventory does not look for LTC in the audio of video files (WAV files are still checked); offload and verify do not need it"},
               "yt-dlp": fetch_check()}
     return {"schema": "ingest/doctor@1", "ok": all(c["status"] != "fail" for c in checks.values()), "checks": checks,
             "hash_algorithms": {a: "ok" if available(a) else "unavailable" for a in OFFLOAD_HASHES + ("c4", "md5", "sha1", "xxh3", "xxh128")},

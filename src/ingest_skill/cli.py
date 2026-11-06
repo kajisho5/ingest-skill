@@ -11,7 +11,7 @@ from typing import Any, Dict, List, Optional
 
 from . import __version__
 from .contract import ERRORS, contract
-from .core import NAME_BY, IngestError, doctor, inventory, offload, verify
+from .core import NAME_BY, IngestError, doctor, inventory, inventory_set, offload, verify
 from .fetch import fetch
 from .hashing import DEFAULT_HASH, OFFLOAD_HASHES
 
@@ -82,8 +82,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     p = sub.add_parser("verify", help="re-hash an offloaded folder against its manifest (sha256 or xxh64) and its ASC MHL history")
     p.add_argument("target")
     p.add_argument("--json", action="store_true")
-    p = sub.add_parser("inventory", help="clip list of a card or an offloaded folder: one entry per recording, sidecars, reel")
-    p.add_argument("target")
+    p = sub.add_parser("inventory", help="clip list of a card or an offloaded folder: one entry per recording, sidecars, reel, sync facts; "
+                                         "several folders: also the sync-group candidates across them (multicam)")
+    p.add_argument("target", nargs="+")
     p.add_argument("--reel", help="the card's reel / card id, overriding the manifest, the clip names and the fingerprint")
     p.add_argument("--json", action="store_true")
     a = ap.parse_args(argv)
@@ -113,8 +114,17 @@ def main(argv: Optional[List[str]] = None) -> int:
             mhl_note = "" if d["mhl"] is None else f"; ASC MHL {d['mhl']['generations']} generation(s), {len(d['mhl']['problems'])} problem(s)"
             _emit(d, a.json, f"{d['ok_files']}/{d['checked']} verified; missing {len(d['missing'])}, changed {len(d['changed'])}, unlisted {len(d['unlisted'])}{mhl_note}")
             return 0 if d["ok"] else ERRORS["INCOMPLETE"]["exit_code"]
+        if a.cmd == "inventory" and len(a.target) > 1:
+            if a.reel:
+                raise IngestError("REEL_INVALID", "--reel names one card: give one folder with it")
+            d = inventory_set(a.target)
+            lines = [f"{d['card_count']} cards, {d['clip_count']} clips; {len(d['sync_groups'])} sync group candidate(s)"]
+            for g in d["sync_groups"]:
+                lines.append(f"  {g['id']} ({g['basis']}): " + ", ".join(f"{m['card']}/{m['clip_id']}{' (reference)' if m['reference'] else ''}" for m in g["members"]))
+            _emit(d, a.json, "\n".join(lines))
+            return 0
         if a.cmd == "inventory":
-            d = inventory(a.target, reel=a.reel)
+            d = inventory(a.target[0], reel=a.reel)
             reel = d["card"]["reel"]
             structures = ", ".join(s["id"] for s in d["card"]["structures"])
             _emit(d, a.json, f"reel {reel['id']} ({reel['source']}); {structures}; {d['clip_count']} clips from {d['file_count']} files "
