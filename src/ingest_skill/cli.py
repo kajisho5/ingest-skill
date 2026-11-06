@@ -14,6 +14,7 @@ from .contract import ERRORS, contract
 from .core import NAME_BY, IngestError, doctor, inventory, inventory_set, offload, verify
 from .fetch import fetch
 from .hashing import DEFAULT_HASH, OFFLOAD_HASHES
+from .progress import json_lines
 
 
 def _emit(doc: Dict[str, Any], as_json: bool, summary: str) -> None:
@@ -28,7 +29,10 @@ def _offload_summary(d: Dict[str, Any]) -> str:
     lines = [f"{'DRY RUN: ' if d['dry_run'] else ''}{len(d['files'])} files, {d['bytes_total'] / 1e9:.2f} GB from {d['source']} ({d['hash']}), reel {reel['id']} ({reel['source']})"]
     for dst in d["destinations"]:
         lines.append(f"  {dst['root']}: copied {dst['copied']}, identical {dst['skipped_identical']}, conflicts {dst['conflicts']}, failed {dst['failed']}"
-                     + (f", growing {dst['growing']} (partial copies, not sealed)" if dst.get("growing") else ""))
+                     + (f", growing {dst['growing']} (partial copies, not sealed)" if dst.get("growing") else "")
+                     + (f", wrote at {dst['write_mb_s']} MB/s" if dst.get("write_mb_s") else ""))
+        for w in dst.get("warnings", []):
+            lines.append(f"    warning: {w}")
         if dst["mhl"]:
             lines.append(f"    ASC MHL: {dst['mhl']}")
         for prob in dst["problems"]:
@@ -69,6 +73,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     p.add_argument("--settle", type=float, help="with --follow: seconds a file's size and mtime must stay unchanged before it is sealed (default 30)")
     p.add_argument("--poll", type=float, help="with --follow: seconds between looks at the source (default 2)")
     p.add_argument("--follow-for", type=float, help="with --follow: stop after this many seconds, leaving unsealed files as growing partial copies")
+    p.add_argument("--progress", action="store_true",
+                   help="write progress as JSON lines to stderr: bytes done, MB/s overall and per destination, ETA, and a warning "
+                        "when one destination writes much slower than the others")
     p.add_argument("--json", action="store_true")
     p = sub.add_parser("fetch", help="download one video URL with yt-dlp (optional extra), then offload it like a card, verified")
     p.add_argument("url", help="the URL of one video; you must have the right to download it")
@@ -98,7 +105,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             return 0 if d["ok"] else 3
         if a.cmd == "offload":
             d = offload(a.source, a.dest, project=a.project, dry_run=a.dry_run, hash_algorithm=a.hash, name_by=a.name_by, reel=a.reel,
-                        follow=a.follow, settle_s=a.settle, poll_s=a.poll, follow_for_s=a.follow_for).to_dict()
+                        follow=a.follow, settle_s=a.settle, poll_s=a.poll, follow_for_s=a.follow_for,
+                        progress=json_lines(sys.stderr) if a.progress else None).to_dict()
             _emit(d, a.json, _offload_summary(d))
             return 0 if d["ok"] else ERRORS["INCOMPLETE"]["exit_code"]
         if a.cmd == "fetch":
