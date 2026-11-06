@@ -13,7 +13,7 @@ TOOLS = [
     {"tool_id": "ingest/offload", "role": "execution", "writes_media": True, "mutates_input": False, "deterministic": True, "network": False,
      "description": "Copy every file of a card or recorder folder to one or more destinations (the source is read once per file, written to every destination in parallel), verified by a sha256 (default) or xxh64 read-back of each; writes ingest-manifest.json and an ASC MHL history generation (ascmhl/) in each. With --follow, recordings still being written are copied as they grow (appended bytes only, each range read back), listed as growing partial copies, and sealed once unchanged for the settle window",
      "argv": ["offload", "<source>", "--dest", "<dir>", "[--dest <dir> ...]", "[--project <name>]", "[--hash sha256|xxh64]", "[--name-by folder|reel]", "[--reel <id>]",
-              "[--follow [--settle <s>] [--poll <s>] [--follow-for <s>]]", "[--dry-run]", "--json"]},
+              "[--follow [--settle <s>] [--poll <s>] [--follow-for <s>]]", "[--progress]", "[--dry-run]", "--json"]},
     {"tool_id": "ingest/verify", "role": "measurement", "writes_media": False, "mutates_input": False, "deterministic": True, "network": False,
      "description": "Re-hash an offloaded folder against its manifest (sha256 or xxh64) and its ASC MHL history: missing, changed and unlisted files; writes nothing",
      "argv": ["verify", "<folder-or-manifest>", "--json"]},
@@ -92,6 +92,12 @@ def contract() -> Dict[str, Any]:
                       "source_is_read_only": True, "overwrites": "never: identical files are skipped, different ones are conflicts"},
         "manifest": {"name": "ingest-manifest.json", "schema": "ingest/manifest@1", "hash": ["sha256", "xxh64"], "default_hash": "sha256",
                      "optional_keys": ["failed", "growing", "card", "fetch"]},
+        # offload --progress (ADR-009): JSON lines on stderr; stdout stays the one report document.
+        "progress": {"stream": "stderr", "format": "JSON lines", "events": ["start", "progress", "file", "slow_destination", "done"],
+                     "fields": ["bytes_done", "bytes_total", "files_done", "files_total", "mb_s", "eta_s", "elapsed_s", "file", "file_bytes", "file_size",
+                                "destinations[].root", "destinations[].bytes_written", "destinations[].mb_s"],
+                     "slow_destination": "a destination writing at under 50% of the destinations' median write speed, judged once each has written 64 MB; also in destinations[].warnings",
+                     "destination_speed": "bytes written / time spent writing and syncing them (the drive's own speed, not the shared pace)"},
         # offload --follow (ADR-007): recordings still being written are copied as they grow and sealed once stable.
         "follow": {"report_key": "follow", "manifest_key": "growing", "seal_when": "size and mtime unchanged for the settle window",
                    "default_settle_s": 30, "default_poll_s": 2, "copies": "appended bytes only, each appended range read back",

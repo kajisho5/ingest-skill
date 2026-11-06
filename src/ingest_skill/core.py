@@ -27,6 +27,7 @@ import queue
 import shutil
 import subprocess
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
@@ -34,6 +35,7 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple, Union
 
 from . import __version__, cards, mhl, sync
+from .progress import DestStats, Progress
 from .errors import IngestError
 from .hashing import CHUNK, DEFAULT_HASH, INSTALL_HINT, MHL_FORMAT_FOR, OFFLOAD_HASHES, MultiHash, available, hash_file, hash_range, require
 
@@ -63,6 +65,8 @@ class DestResult:
     skipped_identical: int = 0
     conflicts: int = 0
     failed: int = 0
+    bytes_written: int = 0             # written by this run (copies and their syncs); with busy time, the drive's speed (ADR-009)
+    write_mb_s: Optional[float] = None # bytes_written / time spent writing and syncing them, in MB/s; None when nothing was written
     growing: int = 0                   # files still being written: a verified partial copy, not sealed (--follow, ADR-007)
     manifest: Optional[str] = None
     mhl: Optional[str] = None          # the ASC MHL generation written by this run
@@ -160,9 +164,9 @@ class _Writer(threading.Thread):
     A write error ends this destination only: it keeps taking chunks (so the source read never waits on it), removes
     its temporary file and keeps the error. Nothing is left at dst unless every chunk was written and synced."""
 
-    def __init__(self, src: Path, dst: Path):
+    def __init__(self, src: Path, dst: Path, stats: Optional[DestStats] = None):
         super().__init__(name=f"ingest-write {dst}", daemon=True)
-        self.src, self.dst = src, dst
+        self.src, self.dst, self.stats = src, dst, stats
         self.tmp = dst.with_name(f".{dst.name}.ingest-{os.getpid()}.part")
         self.chunks: "queue.Queue" = queue.Queue(maxsize=QUEUE_DEPTH)
         self.error: Optional[BaseException] = None
@@ -182,14 +186,20 @@ class _Writer(threading.Thread):
                     break
                 if self.error is None:
                     try:
+                        t = time.perf_counter()
                         fo.write(item)
+                        if self.stats is not None:
+                            self.stats.add(len(item), time.perf_counter() - t)
                     except OSError as e:
                         self.error = e
             if self.error is None and item is _ABORT:
                 self.error = IngestError("INCOMPLETE", f"{self.dst}: not written, the source read did not complete")
             if self.error is None:
+                t = time.perf_counter()
                 fo.flush()
                 os.fsync(fo.fileno())
+                if self.stats is not None:
+                    self.stats.add(0, time.perf_counter() - t)
                 fo.close()
                 fo = None
                 shutil.copystat(self.src, self.tmp)
@@ -220,14 +230,15 @@ def _give(w: _Writer, item: object) -> None:
                 return
 
 
-def _fan_out(src: Path, dsts: Sequence[Path], algorithms: Iterable[str]) -> Tuple[Union[Dict[str, str], BaseException], List[Optional[BaseException]]]:
+def _fan_out(src: Path, dsts: Sequence[Path], algorithms: Iterable[str], stats: Optional[Sequence[DestStats]] = None,
+             on_read=None) -> Tuple[Union[Dict[str, str], BaseException], List[Optional[BaseException]]]:
     """Read src ONCE, hashing every chunk and handing it to one writer per destination (temporary name, fsync, rename).
     With no destination this is a plain hash of src. Returns the source digests (or the error that stopped the read)
     and, per destination, None when the file was written and renamed into place, else the error. No read-back here.
 
     The source is opened once and read once. If it is not read to the end, or its size or modification time changed
     while it was read (SOURCE_CHANGED), no destination keeps the file."""
-    writers = [_Writer(src, d) for d in dsts]
+    writers = [_Writer(src, d, stats[i] if stats else None) for i, d in enumerate(dsts)]
     for w in writers:
         w.start()
     h = MultiHash(algorithms)
@@ -243,6 +254,8 @@ def _fan_out(src: Path, dsts: Sequence[Path], algorithms: Iterable[str]) -> Tupl
                         _give(w, chunk)
                 h.update(chunk)
                 read += len(chunk)
+                if on_read is not None:
+                    on_read(len(chunk))
         after = os.stat(src)
         if read != before.st_size or (after.st_size, after.st_mtime_ns) != (before.st_size, before.st_mtime_ns):
             result = IngestError("SOURCE_CHANGED", f"{src} changed while it was being copied")
@@ -297,14 +310,19 @@ def _copy_verified(src: Path, dst: Path, algorithms: Iterable[str] = ("sha256",)
     return digests
 
 
-def _offload_file(src: Path, size: int, dsts: Sequence[Path], algorithms: Iterable[str]) -> Tuple[Optional[Dict[str, str]], List[Tuple[str, str]]]:
+def _offload_file(src: Path, size: int, dsts: Sequence[Path], algorithms: Iterable[str],
+                  progress: Optional[Progress] = None, dest_index: Optional[Sequence[int]] = None) -> Tuple[Optional[Dict[str, str]], List[Tuple[str, str]]]:
     """One source file to every destination: one read of the source (written to every destination that does not have
     the file yet), then a read-back of every destination, in parallel. Returns the source digests (None when the source
     could not be read) and, per destination, (status, detail): copied, skipped_identical, conflict or failed."""
     algorithms = list(algorithms)
     existing = [d.exists() for d in dsts]
     to_write = [d for d, e in zip(dsts, existing) if not e]
-    digests, write_errors = _fan_out(src, to_write, algorithms)
+    stats = None
+    if progress is not None:
+        index = list(dest_index) if dest_index is not None else list(range(len(dsts)))
+        stats = [progress.dests[index[i]] for i, e in enumerate(existing) if not e]
+    digests, write_errors = _fan_out(src, to_write, algorithms, stats, progress.read if progress is not None else None)
     results: List[Optional[Tuple[str, str]]] = [None] * len(dsts)
     readback: List[int] = []
     werr = iter(write_errors)
@@ -428,6 +446,7 @@ class _Offload:
         self.per_dest: List[Dict[str, Tuple[str, str]]] = [{} for _ in roots]
         # Per destination: path -> the manifest "growing" entry of a partial copy it holds (ADR-007).
         self.growing: List[Dict[str, Dict]] = [dict(p) for p in partials]
+        self.progress: Optional[Progress] = None   # bytes, speeds and the slow-destination warning (ADR-009)
 
     def algorithms(self, rel: str) -> List[str]:
         """The offload hash, the ASC MHL format, and every earlier ASC MHL format for this file that can be computed here."""
@@ -462,11 +481,16 @@ class _Offload:
         rec.status = next((s for s in ("failed", "conflict", "growing", "copied") if s in statuses), "skipped_identical")
         self.report.bytes_total += rec.size
         self.report.files.append(rec)
+        if self.progress is not None:
+            p = self.progress
+            p.file_done(rec.path, rec.size, rec.status, p.file_bytes if p.file == rec.path else 0)
 
     def copy_file(self, f: Path, rel: str, st: os.stat_result) -> str:
         """The ordinary path: one read, every destination written and read back (ADR-004). With retry_changed, a file
         that changed while it was read is not recorded (returns "source_changed"): --follow copies it as it grows."""
-        src_digests, outcome = _offload_file(f, st.st_size, self.dest_paths(rel), self.algorithms(rel))
+        if self.progress is not None:
+            self.progress.file_start(rel, st.st_size)
+        src_digests, outcome = _offload_file(f, st.st_size, self.dest_paths(rel), self.algorithms(rel), self.progress)
         if self.retry_changed and src_digests is None and outcome and all(s == "failed" and "changed while it was being copied" in d for s, d in outcome):
             return "source_changed"
         self.record(FileRecord(rel, st.st_size, mtime=_iso(st.st_mtime)), src_digests, outcome)
@@ -550,7 +574,7 @@ def read_partials(root: Path) -> Dict[str, Dict]:
 def offload(source: str, destinations: Iterable[str], project: Optional[str] = None, dry_run: bool = False, hash_algorithm: str = DEFAULT_HASH,
             name_by: str = "folder", reel: Optional[str] = None, fetch: Optional[Dict] = None, follow: bool = False,
             settle_s: Optional[float] = None, poll_s: Optional[float] = None, follow_for_s: Optional[float] = None,
-            clock=None, sleep=None) -> OffloadReport:
+            clock=None, sleep=None, progress=None, progress_interval_s: Optional[float] = None, slow_min_bytes: Optional[int] = None) -> OffloadReport:
     """Copy the card folder to each destination as <dest>/<project>/<name>, where name is the source folder's name
     (name_by="folder", the default) or its reel / card id (name_by="reel", see cards.derive_reel). Every file of the
     folder is copied unchanged, whatever its card structure. `fetch` is the download record of an `ingest fetch`
@@ -558,7 +582,11 @@ def offload(source: str, destinations: Iterable[str], project: Optional[str] = N
 
     follow=True (ADR-007): files still being written are copied as they grow and sealed once their size and mtime have
     been unchanged for settle_s seconds; the run polls every poll_s seconds and ends when every file is sealed, after
-    follow_for_s seconds, or on Ctrl-C. clock / sleep replace time.monotonic / time.sleep (tests)."""
+    follow_for_s seconds, or on Ctrl-C. clock / sleep replace time.monotonic / time.sleep (tests).
+
+    progress (ADR-009): a callable given one event dict at a time (start, progress, file, slow_destination, done); the
+    CLI's --progress writes them as JSON lines to stderr. Every run measures each destination's write speed and warns
+    (DestResult.warnings) when one writes at under half the destinations' median speed."""
     from . import follow as follow_mod
     src = Path(source).resolve()
     if not src.is_dir():
@@ -593,6 +621,9 @@ def offload(source: str, destinations: Iterable[str], project: Optional[str] = N
         histories.append(mhl.read_history(root))
         dres.problems.extend(p for p in histories[-1].problems if p not in dres.problems)
     ctx = _Offload(src, roots, report, histories, [read_partials(r) for r in roots], retry_changed=follow)
+    kw_p = {k: v for k, v in (("interval_s", progress_interval_s), ("slow_min_bytes", slow_min_bytes)) if v is not None}
+    ctx.progress = Progress([str(r) for r in roots], sum(f.stat().st_size for f in files), len(files), emit=progress, eta=not follow, **kw_p)
+    ctx.progress.start()
     if follow:
         kw = {k: v for k, v in (("clock", clock), ("sleep", sleep)) if v is not None}
         report.follow = follow_mod.follow(ctx, settle_s, poll_s, follow_for_s, **kw)
@@ -614,8 +645,13 @@ def offload(source: str, destinations: Iterable[str], project: Optional[str] = N
             else:
                 ctx.finish_growing(g, None, st)
     ctx.finalize(started)
+    for i, (dres, stats) in enumerate(zip(report.destinations, ctx.progress.dests)):
+        dres.bytes_written, dres.write_mb_s = stats.bytes, stats.mb_s()
+        if i in ctx.progress.slow:
+            dres.warnings.append(ctx.progress.slow[i])
     report.ok = all(d.failed == 0 and d.conflicts == 0 and d.growing == 0 and d.mhl_failed == 0 and not d.problems for d in report.destinations)
     report.finished_at = _now()
+    ctx.progress.finish(report.ok)
     return report
 
 
