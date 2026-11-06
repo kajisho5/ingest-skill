@@ -39,6 +39,9 @@ def _offload_summary(d: Dict[str, Any]) -> str:
             lines.append(f"    {prob['code']}: {prob['detail']}")
         if dst["mhl_failed"]:
             lines.append(f"    {dst['mhl_failed']} file(s) differ from their earlier ASC MHL record")
+    if d.get("proxy"):
+        px = d["proxy"]
+        lines.append(f"  proxies ({px['encoder']}): made {px['made']}, already there {px['exists']}, failed {px['failed']}, skipped {px['skipped']}")
     if d.get("follow"):
         fo = d["follow"]
         lines.append(f"  followed {len(fo['files'])} growing file(s) over {fo['polls']} poll(s), settle {fo['settle_s']:g} s; stopped: {fo['stopped']}")
@@ -73,6 +76,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     p.add_argument("--settle", type=float, help="with --follow: seconds a file's size and mtime must stay unchanged before it is sealed (default 30)")
     p.add_argument("--poll", type=float, help="with --follow: seconds between looks at the source (default 2)")
     p.add_argument("--follow-for", type=float, help="with --follow: stop after this many seconds, leaving unsealed files as growing partial copies")
+    p.add_argument("--proxy", action="store_true",
+                   help="queue ffmpeg-skill proxy for each verified video file (with --hw when its doctor reports it), into "
+                        "<destination>/ingest-proxies/, while the next files copy; a failed proxy does not fail the offload")
+    p.add_argument("--ffmpeg-skill", help="with --proxy: the ffmpeg-skill folder (default $INGEST_FFMPEG_SKILL_DIR or ~/.claude/skills/ffmpeg-skill)")
+    p.add_argument("--proxy-width", type=int, help="with --proxy: proxy width in pixels (default: ffmpeg-skill's, 640)")
     p.add_argument("--progress", action="store_true",
                    help="write progress as JSON lines to stderr: bytes done, MB/s overall and per destination, ETA, and a warning "
                         "when one destination writes much slower than the others")
@@ -106,7 +114,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         if a.cmd == "offload":
             d = offload(a.source, a.dest, project=a.project, dry_run=a.dry_run, hash_algorithm=a.hash, name_by=a.name_by, reel=a.reel,
                         follow=a.follow, settle_s=a.settle, poll_s=a.poll, follow_for_s=a.follow_for,
-                        progress=json_lines(sys.stderr) if a.progress else None).to_dict()
+                        progress=json_lines(sys.stderr) if a.progress else None,
+                        proxy=a.proxy, ffmpeg_skill=a.ffmpeg_skill, proxy_width=a.proxy_width).to_dict()
             _emit(d, a.json, _offload_summary(d))
             return 0 if d["ok"] else ERRORS["INCOMPLETE"]["exit_code"]
         if a.cmd == "fetch":
