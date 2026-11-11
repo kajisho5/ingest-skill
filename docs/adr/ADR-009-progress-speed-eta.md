@@ -52,7 +52,7 @@ What constrains it:
   - one `progress` line per chunk with a zero interval, each with the file's bytes and every destination;
   - one `file` line per file;
   - `bytes_written` and `write_mb_s` per destination.
-- **Throttled destination:** three destinations at about 6.5, 1.3 and 6.5 MB/s. A single `slow_destination` event names the slow one, before the first (1.2 MB) file is done, and its warning is in that destination's `warnings` only. The run is ok.
+- **Throttled destination:** three destinations at 6.6, 1.3 and 6.6 MB/s. The simulated drives are folders of one real disk, so the test gives the writer threads a clock on which a write takes exactly its drive's delay: the real disk's own latency, the same for every folder, would otherwise hide the difference on a busy machine. A single `slow_destination` event names the slow one, before the first (1.2 MB) file is done, and its warning is in that destination's `warnings` only. The run is ok.
 - Two equally slow destinations raise no warning.
 - A resume reads and counts every byte but writes none (`write_mb_s` null).
 - `--follow` has no ETA.
