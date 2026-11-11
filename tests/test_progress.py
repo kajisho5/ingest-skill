@@ -115,7 +115,9 @@ class ProgressTests(unittest.TestCase):
         self.assertEqual([e["root"] for e in slow], [r.destinations[1].root], "warned once, about ssd2 only")
         first_file = next(i for i, e in enumerate(events) if e["event"] == "file")
         self.assertLess(events.index(slow[0]), first_file, "raised while the first (1.2 MB) file is still being copied")
-        self.assertEqual((slow[0]["dest_mb_s"], slow[0]["median_mb_s"]), (1.3, 6.6))
+        self.assertEqual(slow[0]["dest_mb_s"], 1.3)
+        # Judged against both fast drives (median 6.6), or against one if the other's thread has not written 256 kB yet.
+        self.assertIn(slow[0]["median_mb_s"], (6.6, round((1.3 + 6.6) / 2, 1)))
         self.assertLess(slow[0]["dest_mb_s"], 0.5 * slow[0]["median_mb_s"])
         self.assertIn("sets the pace", slow[0]["detail"])
         self.assertEqual([any("MB/s" in w for w in d.warnings) for d in r.destinations], [False, True, False])
