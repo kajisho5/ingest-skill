@@ -36,10 +36,12 @@ SMALL_CHUNK = 64 * 1024   # so that the 300 kB clip is several chunks and a faul
 class _Tracked:
     """A file object that counts the bytes read through it and can fail or stall on write / read."""
 
-    def __init__(self, f, rec: "OpenRecorder", key: Path, fail_write_after=None, fail_read_after=None, on_read=None, write_delay=0.0):
+    def __init__(self, f, rec: "OpenRecorder", key: Path, fail_write_after=None, fail_read_after=None, on_read=None, write_delay=0.0,
+                 on_write=None):
         self._f, self._rec, self._key = f, rec, key
         self._writes = self._reads = 0
         self._fail_write_after, self._fail_read_after, self._on_read, self._write_delay = fail_write_after, fail_read_after, on_read, write_delay
+        self._on_write = on_write
 
     def read(self, *a):
         if self._fail_read_after is not None and self._reads >= self._fail_read_after:
@@ -56,6 +58,8 @@ class _Tracked:
             raise OSError(errno.ENOSPC, "No space left on device")
         if self._write_delay:
             time.sleep(self._write_delay)
+        if self._on_write:
+            self._on_write(self._write_delay)
         self._writes += 1
         return self._f.write(data)
 

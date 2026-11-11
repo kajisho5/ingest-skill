@@ -1,6 +1,11 @@
 """Roadmap step 10 / ADR-009: `offload --progress` reports bytes, MB/s per destination and the ETA as JSON lines, and
 warns, while the copy runs, about a destination much slower than the others. A slow drive is simulated by delaying
-every write to it (the open() wrapper of test_fanout)."""
+every write to it (the open() wrapper of test_fanout).
+
+The simulated drives are folders of one real disk, so the real time of a write is the same for all of them. On a busy
+machine that shared time can be larger than the delays (seen on a macOS CI runner: every write took tens of
+milliseconds), and it hides the difference between the drives. The tests that compare drive speeds therefore give the
+writer threads a clock on which a write takes exactly its drive's delay (DriveClock)."""
 from __future__ import annotations
 
 import io
@@ -9,6 +14,8 @@ import os
 import shutil
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
@@ -22,6 +29,23 @@ from ingest_skill.core import offload  # noqa: E402
 from test_fanout import OpenRecorder  # noqa: E402
 
 SMALL_CHUNK = 64 * 1024
+
+
+class DriveClock:
+    """Replaces the time module inside ingest_skill.core. perf_counter(), which the writer threads use to time a write,
+    counts only the delays of the calling thread's own simulated drive; every other name is the real time module's."""
+
+    def __init__(self):
+        self._local = threading.local()
+
+    def advance(self, seconds):
+        self._local.now = self.perf_counter() + seconds
+
+    def perf_counter(self):
+        return getattr(self._local, "now", 0.0)
+
+    def __getattr__(self, name):
+        return getattr(time, name)
 
 
 class ProgressTests(unittest.TestCase):
@@ -38,12 +62,16 @@ class ProgressTests(unittest.TestCase):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def run_offload(self, dests, delays=None, **kw):
-        """delays: destination name -> seconds added to every write of a chunk (a drive of that speed)."""
+        """delays: destination name -> seconds every write of a chunk takes (a drive of that speed). The write really
+        waits that long, so the copy runs at the pace of the slowest drive, and the writer's clock (DriveClock) counts
+        exactly that long, whatever the real disk under the test does."""
         events = []
-        with OpenRecorder() as rec, mock.patch.object(core, "CHUNK", SMALL_CHUNK):
+        clock = DriveClock()
+        with OpenRecorder() as rec, mock.patch.object(core, "CHUNK", SMALL_CHUNK), mock.patch.object(core, "time", clock if delays else time):
             for name, delay in (delays or {}).items():
                 d = self.tmp / name
-                rec.faults.append((lambda p, mode, d=d: "w" in mode and d in p.parents and p.name.endswith(".part"), {"write_delay": delay}))
+                rec.faults.append((lambda p, mode, d=d: "w" in mode and d in p.parents and p.name.endswith(".part"),
+                                   {"write_delay": delay, "on_write": clock.advance}))
             r = offload(str(self.card), [str(self.tmp / d) for d in dests], progress=events.append, progress_interval_s=0, **kw)
         return r, events
 
@@ -79,7 +107,7 @@ class ProgressTests(unittest.TestCase):
             self.assertEqual(json.loads(json.dumps(line)), line)
 
     def test_a_throttled_destination_is_warned_about_while_the_copy_runs(self):
-        # About 6.5 MB/s, 1.3 MB/s and 6.5 MB/s: the delays dwarf the thread-scheduling noise of a page-cache write.
+        # 64 kB chunks in 10 ms, 50 ms and 10 ms: 6.6, 1.3 and 6.6 MB/s on the drives' clock.
         r, events = self.run_offload(["ssd1", "ssd2", "ssd3"], delays={"ssd1": 0.01, "ssd2": 0.05, "ssd3": 0.01}, slow_min_bytes=256 * 1024)
         self.assertTrue(r.ok, "slow is not failed: every copy is still verified")
         self.assert_monotonic(events)
@@ -87,14 +115,20 @@ class ProgressTests(unittest.TestCase):
         self.assertEqual([e["root"] for e in slow], [r.destinations[1].root], "warned once, about ssd2 only")
         first_file = next(i for i, e in enumerate(events) if e["event"] == "file")
         self.assertLess(events.index(slow[0]), first_file, "raised while the first (1.2 MB) file is still being copied")
+        self.assertEqual(slow[0]["dest_mb_s"], 1.3)
+        # Judged against both fast drives (median 6.6), or against one if the other's thread has not written 256 kB yet.
+        self.assertIn(slow[0]["median_mb_s"], (6.6, round((1.3 + 6.6) / 2, 1)))
         self.assertLess(slow[0]["dest_mb_s"], 0.5 * slow[0]["median_mb_s"])
         self.assertIn("sets the pace", slow[0]["detail"])
         self.assertEqual([any("MB/s" in w for w in d.warnings) for d in r.destinations], [False, True, False])
+        # The whole card: 1.5 MB in 24 writes (the last chunk of a file is a short one).
+        self.assertEqual([d.write_mb_s for d in r.destinations], [6.2, 1.2, 6.2])
 
     def test_equally_slow_destinations_are_not_warned_about(self):
         r, events = self.run_offload(["ssd1", "ssd2"], delays={"ssd1": 0.01, "ssd2": 0.01}, slow_min_bytes=256 * 1024)
         self.assertTrue(r.ok)
         self.assertFalse([e for e in events if e["event"] == "slow_destination"])
+        self.assertEqual([d.write_mb_s for d in r.destinations], [6.2, 6.2])
 
     def test_resume_reads_and_counts_but_writes_nothing(self):
         self.run_offload(["ssd1"])
