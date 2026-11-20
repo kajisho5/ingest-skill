@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ingest-skill"
-version = "0.1.2"
+version = "0.1.3"
 description = "Verified media offload from camera cards and recorders: sha256 (or xxh64) read-back on every copy, dual backup, manifest, ASC MHL history and clip inventory. Local; optional URL fetch through yt-dlp."
 readme = "README.md"
 license = {text = "MIT"}

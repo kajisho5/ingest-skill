@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.1.3 - 2026-11-20
+
+- fix(sync): rates and timecode by velisa/timebase@1; refuse labels that do not exist (#27) (c7f8b42)
+- ci: Velisa's reusable changelog-check/release-guard; dependencies PRs release a patch (D36, D37) (#25) (27bb92c)
+
 ## v0.1.2 - 2026-11-19
 
 - ci(release): test the release commit before pushing; no release for chore/ci/docs-only changes (#24) (f11d0d6)
