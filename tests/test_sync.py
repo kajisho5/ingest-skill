@@ -231,7 +231,7 @@ class FactsTests(unittest.TestCase):
         self.assertEqual(sync.parse_rate("25/1"), Fraction(25))
         self.assertIsNone(sync.parse_rate("0/0"))
         self.assertAlmostEqual(sync.tc_seconds("01:00:00;00", Fraction(30000, 1001)), 3599.9964, places=3)
-        self.assertEqual(sync.tc_seconds("10:00:00:12", Fraction(25)), 36000.48)
+        self.assertEqual(sync.tc_seconds("10:00:00:12", Fraction(25)), Fraction(3600048, 100))  # exact (TB-1)
 
     def test_unreadable_files_give_unknown_not_zero(self):
         tmp = Path(tempfile.mkdtemp()).resolve()

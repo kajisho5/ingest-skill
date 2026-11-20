@@ -16,6 +16,7 @@ standard library, and in the audio of other files only when ffmpeg is on PATH (d
 from __future__ import annotations
 
 import array
+import math
 import re
 import shutil
 import struct
@@ -33,58 +34,140 @@ LTC_MAX_STREAMS = 16
 IXML_LIMIT = 1024 * 1024
 MIN_OVERLAP_S = 1.0          # two clips must share at least this much time to be grouped
 BASES = ("timecode", "utc", "local")
-_RATE_NAMES = {"23.98": Fraction(24000, 1001), "23.976": Fraction(24000, 1001), "29.97": Fraction(30000, 1001),
-               "47.95": Fraction(48000, 1001), "59.94": Fraction(60000, 1001), "119.88": Fraction(120000, 1001)}
+# Frame rates and timecode follow the ecosystem timebase spec velisa/timebase@1 (Velisa ADR-026; ADR-013 here).
+NTSC_BASES = (24, 30, 48, 60, 120, 240)   # TB-2: a decimal within 0.005 of base * 1000/1001 is that NTSC rate
+NTSC_TOLERANCE = Fraction(5, 1000)
+MAX_RATE = Fraction(1000)
+DROP_FRAME_RATES = (Fraction(30000, 1001), Fraction(60000, 1001))
+_DECIMAL = re.compile(r"^\+?(\d+(\.\d*)?|\.\d+)([eE][+-]?\d+)?$")
+_TC = re.compile(r"^(\d{1,2}):(\d\d):(\d\d)([:;.,])(\d{1,3})$")
+
+
+class TimecodeError(ValueError):
+    """A timecode label or frame count the spec refuses. `code`: INVALID_TIMECODE, DROP_FRAME_UNSUPPORTED,
+    NONEXISTENT_LABEL or OUT_OF_RANGE."""
+
+    def __init__(self, code: str, message: str):
+        super().__init__(f"{code}: {message}")
+        self.code = code
 
 
 # ---------------------------------------------------------------------------------------------------------- rates
 def parse_rate(text: Optional[str]) -> Optional[Fraction]:
-    """'25', '25/1', '30000/1001', '29.97', and Sony formatFps ('25p', '59.94i': fields, so 29.97 frames)."""
-    if text is None:
+    """A frame rate as an exact fraction, or None when it is not one (TB-2).
+
+    'N/D' is taken as written ('30000/1001', '25/1', '2997/100'). A decimal is read exactly; one that is not an
+    integer and lies within 0.005 of base * 1000/1001 (base 24, 30, 48, 60, 120, 240) is that NTSC rate ('23.98',
+    '29.970', '47.952', '59.94'). Sony formatFps names fields with 'i' ('59.94i' is 30000/1001 frames) and frames
+    with 'p'. The rate must be in (0, 1000]. Never limit_denominator: 29.97 is not 2997/100."""
+    if text is None or isinstance(text, bool):
         return None
-    s = str(text).strip().lower()
+    s = repr(text) if isinstance(text, float) else str(text)
+    s = s.strip().lower()
     interlaced = s.endswith("i")
-    s = s.rstrip("pi")
+    if s.endswith(("i", "p")):
+        s = s[:-1]
     try:
         if "/" in s:
             n, d = s.split("/", 1)
             r = Fraction(int(n), int(d))
+        elif _DECIMAL.match(s):
+            r = Fraction(s)
+            if r.denominator != 1:
+                r = next((Fraction(b * 1000, 1001) for b in NTSC_BASES
+                          if abs(r - Fraction(b * 1000, 1001)) <= NTSC_TOLERANCE), r)
         else:
-            r = _RATE_NAMES.get(s) or Fraction(s).limit_denominator(1001)
+            return None
     except (ValueError, ZeroDivisionError):
         return None
-    if r <= 0:
+    if interlaced:
+        r = r / 2
+    if r <= 0 or r > MAX_RATE:
         return None
-    return r / 2 if interlaced else r
+    return r
 
 
 def rate_text(r: Optional[Fraction]) -> Optional[str]:
     return None if r is None else f"{r.numerator}/{r.denominator}"
 
 
-def tc_seconds(tc: str, rate: Fraction) -> Optional[float]:
-    """Seconds since midnight of a timecode label HH:MM:SS:FF (';' or '.' before FF: drop-frame, counted back to real
-    frames for 29.97 / 59.94)."""
-    m = re.match(r"^(\d{1,2}):(\d\d):(\d\d)([:;.,])(\d{1,3})$", tc.strip())
-    if not m or rate is None:
-        return None
+def round_half_up(x: Fraction) -> int:
+    """The nearest integer, a half up (floor(x + 1/2), TB-4); Python's round() takes a half to even."""
+    return math.floor(x + Fraction(1, 2))
+
+
+def nominal_rate(rate: Fraction) -> int:
+    """Timecode frames per second: the rate rounded half up (24 for 23.976, 30 for 29.97)."""
+    return max(1, round_half_up(rate))
+
+
+def _drop_per_minute(rate: Fraction) -> int:
+    if rate not in DROP_FRAME_RATES:
+        raise TimecodeError("DROP_FRAME_UNSUPPORTED",
+                            f"drop-frame timecode exists only at 30000/1001 and 60000/1001, not {rate_text(rate)}")
+    return 2 * nominal_rate(rate) // 30
+
+
+def tc_frames(tc: str, rate: Fraction, drop_frame: Optional[bool] = None) -> int:
+    """Frames since 00:00:00:00 of a label HH:MM:SS:FF (TB-6). ';', ',' or '.' before FF marks drop-frame unless
+    `drop_frame` states the mode. Refused (TimecodeError), never moved: a malformed label, hours above 23, a frame
+    number at or above the nominal rate, drop-frame at a rate that has none, and a drop-frame label that is skipped
+    (00:01:00;00 at 29.97)."""
+    m = _TC.match(str(tc).strip())
+    if not m:
+        raise TimecodeError("INVALID_TIMECODE", f"{tc!r} is not hh:mm:ss:ff")
     h, mi, s, sep, f = int(m.group(1)), int(m.group(2)), int(m.group(3)), m.group(4), int(m.group(5))
-    nominal = round(rate)
-    frames = ((h * 60 + mi) * 60 + s) * nominal + f
-    if sep in ";.," and rate.denominator == 1001 and nominal in (30, 60):
-        drop = 2 * nominal // 30
-        total_min = h * 60 + mi
-        frames -= drop * (total_min - total_min // 10)
-    return float(frames / rate)
+    if h > 23 or mi > 59 or s > 59:
+        raise TimecodeError("INVALID_TIMECODE", f"{tc!r}: hours 00-23, minutes and seconds 00-59")
+    fps = nominal_rate(rate)
+    if f >= fps:
+        raise TimecodeError("INVALID_TIMECODE", f"{tc!r}: frame {f} is out of range at {fps} timecode frames per second")
+    df = sep != ":" if drop_frame is None else bool(drop_frame)
+    total = ((h * 60 + mi) * 60 + s) * fps + f
+    if df:
+        drop = _drop_per_minute(rate)
+        if s == 0 and f < drop and mi % 10 != 0:
+            raise TimecodeError("NONEXISTENT_LABEL", f"{tc!r} does not exist in drop-frame timecode")
+        minutes = h * 60 + mi
+        total -= drop * (minutes - minutes // 10)
+    return total
 
 
-def tc_label(seconds: float, rate: Fraction) -> str:
-    """A non-drop timecode label for seconds since midnight (used for BWF time references)."""
-    nominal = round(rate)
-    frames = int(round(seconds * float(rate)))
-    f = frames % nominal
-    s = frames // nominal
-    return f"{s // 3600 % 24:02d}:{s // 60 % 60:02d}:{s % 60:02d}:{f:02d}"
+def tc_seconds(tc: str, rate: Optional[Fraction], drop_frame: Optional[bool] = None) -> Optional[Fraction]:
+    """Seconds since midnight of a timecode label, exact (TB-1): its frame count over the rate. None when the rate is
+    not known; TimecodeError when the label is refused (see tc_frames)."""
+    if rate is None:
+        return None
+    return Fraction(tc_frames(tc, rate, drop_frame)) / rate
+
+
+def tc_from_frames(frames: int, rate: Fraction, drop_frame: bool = False) -> str:
+    """A frame count since 00:00:00:00 as a label; 24 hours or more is refused (OUT_OF_RANGE), never wrapped."""
+    if frames < 0:
+        raise TimecodeError("OUT_OF_RANGE", f"frame count {frames} is negative")
+    fps = nominal_rate(rate)
+    n = frames
+    if drop_frame:
+        drop = _drop_per_minute(rate)
+        per_10min, per_min = fps * 600 - drop * 9, fps * 60 - drop
+        d, m = divmod(n, per_10min)
+        n += drop * 9 * d + (drop * ((m - drop) // per_min) if m >= drop else 0)
+    h, rem = divmod(n, fps * 3600)
+    if h >= 24:
+        raise TimecodeError("OUT_OF_RANGE", f"frame count {frames} is 24 hours or more of timecode")
+    mi, rem = divmod(rem, fps * 60)
+    s, f = divmod(rem, fps)
+    return f"{h:02d}:{mi:02d}:{s:02d}{';' if drop_frame else ':'}{f:02d}"
+
+
+def tc_label(seconds, rate: Fraction) -> Optional[str]:
+    """A non-drop timecode label of the frame nearest to `seconds` since midnight (BWF time references), computed on
+    exact fractions. None when that frame is 24 hours or more of timecode: a label is never wrapped to 00."""
+    frames = round_half_up(Fraction(str(seconds)) * rate)
+    try:
+        return tc_from_frames(frames, rate)
+    except TimecodeError:
+        return None
 
 
 def sony_ltc_start(value: Optional[str]) -> Optional[str]:
@@ -317,14 +400,18 @@ def clip_sync(root: Path, clip: Dict, probe: Optional[Dict]) -> Dict:
     elif sony_ltc_start(meta.get("ltc_start")):
         out["start_timecode"], src["start_timecode"] = sony_ltc_start(meta["ltc_start"]), "sony_nonrealtimemeta"
     if out["start_timecode"] and tcr is not None:
-        out["start_tod_s"] = tc_seconds(out["start_timecode"], tcr)
+        try:
+            out["start_tod_s"] = float(tc_seconds(out["start_timecode"], tcr))
+        except TimecodeError as e:   # a label that does not exist at this rate: no time of day, and say why
+            out["start_timecode_error"] = {"code": e.code, "message": str(e)}
     # A bext time reference of 0 is what recorders write when no timecode is set: read as unknown, not as midnight.
     if wav and wav.get("bext", {}).get("time_reference") and wav["fmt"]["rate"]:
         tod = wav["bext"]["time_reference"] / wav["fmt"]["rate"]
         if tod < 86400:
             out["start_tod_s"], src["start_tod_s"] = round(tod, 6), "bwf_bext_time_reference"
-            if not out["start_timecode"] and tcr is not None:
-                out["start_timecode"], src["start_timecode"] = tc_label(tod, tcr), "bwf_bext_time_reference"
+            label = tc_label(tod, tcr) if not out["start_timecode"] and tcr is not None else None
+            if label:
+                out["start_timecode"], src["start_timecode"] = label, "bwf_bext_time_reference"
     elif out["start_tod_s"] is not None:
         src["start_tod_s"] = src["start_timecode"]
     if out["start_tod_s"] is not None:

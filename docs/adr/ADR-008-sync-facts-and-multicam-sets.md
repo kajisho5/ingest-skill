@@ -21,7 +21,7 @@ What must not change: inventory reads only; a fact that no source gives is unkno
    | `frame_rate` (`"25/1"`, `"30000/1001"`) | ffprobe's `avg_frame_rate` of the video stream; the Sony NonRealTimeMeta `formatFps` (`"59.94i"` is fields: 29.97 frames) |
    | `timecode_rate` | Sony `LtcChangeTable@tcFps`; iXML `SPEED/TIMECODE_RATE`; else the frame rate |
    | `start_timecode` | ffprobe's `timecode` tag (MOV `tmcd`, MXF); the first Sony `LtcChange` (frame 0); for a BWF file, its `bext` time reference written as a non-drop label at the timecode rate |
-   | `start_tod_s` | seconds since midnight: the start timecode at the timecode rate (drop-frame labels counted back to real frames), or the BWF `bext` TimeReference ÷ sample rate |
+   | `start_tod_s` | seconds since midnight: the start timecode at the timecode rate (drop-frame labels counted back to real frames), or the BWF `bext` TimeReference ÷ sample rate. A label that does not exist at that rate is not read: `start_tod_s` stays null and `start_timecode_error` says why (ADR-013) |
    | `wall_clock_start` (`value`, `utc`, `local`, `source`) | the Sony `CreationDate` (with its UTC offset, so both `utc` and `local`); the BWF `bext` OriginationDate + OriginationTime (local, no zone: `utc` null); ffprobe's `creation_time` (UTC only: cameras disagree on whether it is local or UTC, start or end, so `local` stays null) |
    | `duration_s` | ffprobe; Sony `Duration` frames ÷ frame rate; the WAV data chunk ÷ byte rate |
    | `device` | `kind` (`recorder` for an audio-only file, else `camera`); Sony `Device` (manufacturer, model, serial); BWF `bext` Originator and OriginatorReference; iXML `TAPE`; ffprobe's `make` / `model` tags |
