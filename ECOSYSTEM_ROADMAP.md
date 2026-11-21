@@ -56,6 +56,9 @@ The agent's adapter runs `offload` / `inventory` (step 6, video-production-agent
   - Done when: an offload with `--proxy` gives one proxy per clip linked by the original's hash; a failed proxy does not fail the offload
   - Done (ADR-010): `offload --proxy [--ffmpeg-skill DIR] [--proxy-width PX]` queues ffmpeg-skill `scripts/proxy.py` for each verified video member of the card's clips, from the first verified copy, in one worker thread while the next files copy; proxies go to `<copy>/ingest-proxies/` with `proxies.json` (`ingest/proxies@1`: original hash, proxy sha256, encoder, ffmpeg-skill version) and `inventory` links them by the original's manifest hash (`ingest_proxies`). A failed proxy is a warning, never a failed offload; a resume keeps proxies already made; no ffmpeg-skill is `PROXY_UNAVAILABLE`. `--hw` is passed when ffmpeg-skill's doctor reports `hw.platform_ok` (VideoToolbox, the only hardware path its tools take; its NVENC / QSV / VAAPI / AMF `gpu_encoders` are listed, not used). Tested with a stand-in ffmpeg-skill and once with the real 3.1.8 on CPU; VideoToolbox not exercised (no Apple Silicon machine)
 
+- [x] **12. 1.0.0: the compatibility promise** — `offload`, `verify` and `inventory` are `STABLE`; `fetch` and the newer opt-in parts (`--follow`, `--progress`, `--proxy`, sync facts and sync groups) stay experimental (Velisa ADR-031 / D46) ([#30](https://github.com/kajisho5/ingest-skill/pull/30), ADR-014)
+  - Done when: the contract marks the three local tools `STABLE` with a `none` contract diff, the README and an ADR state the promise, and 1.0.0 is released and re-pinned by the agent
+
 ## Boundaries
 
 URL download (URL素材取得) is owned here since 2026-10-30 (owner decision) and ships as `ingest fetch` (step 7); the agent has switched to `ingest fetch ... --json` (its ADR-059).
