@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.0.0 - 2026-11-21
+
+- feat!: 1.0.0 - offload, verify and inventory are STABLE; breaking changes to them only in a major release (ADR-014) (#30) (e03f743)
+- ci: a contract:breaking pull request on 1.x needs the major label (Velisa ADR-031 section 5) (#29) (2455772)
+- ci: release gate leaves contract:* labels out of the count (#28) (5f3afc9)
+
 ## v0.1.3 - 2026-11-20
 
 - fix(sync): rates and timecode by velisa/timebase@1; refuse labels that do not exist (#27) (c7f8b42)
