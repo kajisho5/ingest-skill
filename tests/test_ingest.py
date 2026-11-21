@@ -371,6 +371,23 @@ class InventoryAndContractTests(unittest.TestCase):
         for code in ("SOURCE_CHANGED", "VERIFY_MISMATCH", "HASH_UNAVAILABLE", "FILE_MISSING", "MHL_INVALID", "FETCH_UNAVAILABLE", "FETCH_FAILED", "URL_INVALID"):
             self.assertIn(code, c["errors"])
 
+    def test_provides_lifecycle_is_the_1_0_promise(self):
+        """docs/adr/ADR-014-1-0-compatibility-promise.md: offload, verify and inventory are STABLE; fetch (yt-dlp and the
+        sites it reads) stays EXPERIMENTAL. Promoting an entry is metadata only (si's `lifecycle-promoted` rule), so the
+        ids, tool ids and their order are unchanged."""
+        from ingest_skill.contract import OPERATIONS, STABLE_OPERATIONS
+        c = contract()
+        self.assertEqual(c["provides"], [
+            {"id": "ingest.offload", "lifecycle": "STABLE", "tool_id": "ingest/offload"},
+            {"id": "ingest.verify", "lifecycle": "STABLE", "tool_id": "ingest/verify"},
+            {"id": "ingest.inventory", "lifecycle": "STABLE", "tool_id": "ingest/inventory"},
+            {"id": "ingest.fetch", "lifecycle": "EXPERIMENTAL", "tool_id": "ingest/fetch"},
+        ])
+        self.assertLessEqual(STABLE_OPERATIONS, set(OPERATIONS))
+        self.assertEqual([t["tool_id"] for t in c["tools"]], [f"ingest/{op}" for op in OPERATIONS])
+        # the network tool is the experimental one: nothing STABLE leaves the machine
+        self.assertFalse(set(c["execution"]["network_tools"]) & {f"ingest/{op}" for op in STABLE_OPERATIONS})
+
     def test_contract_manifest_and_inventory_keys_stay_as_consumers_pinned_them(self):
         # video-production-agent pins these two values (a change is fatal drift there); later additions get keys of their own.
         c = contract()

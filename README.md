@@ -42,4 +42,19 @@ ingest fetch "https://example.com/watch?v=abc123" --dest /Volumes/SSD1/Footage -
 
 Exit codes: `0` ok, `2` refused (nothing written), `3` incomplete (including `FETCH_FAILED`: the download failed, nothing written). Python 3.9+, standard library only; `xxhash` is an optional extra (`pip install "ingest-skill[xxhash]"`; without it `--hash xxh64` is refused as `HASH_UNAVAILABLE` and `ingest doctor` reports it unavailable), `yt-dlp` is an optional extra (`pip install "ingest-skill[fetch]"`; without it `fetch` is refused as `FETCH_UNAVAILABLE` and `ingest doctor` reports it unavailable, with its version when installed) and `ffprobe` is optional (inventory facts are reported as unknown without it). Only `fetch` uses the network; offload, verify and inventory are local. See [SKILL.md](SKILL.md) for the agent-facing rules and [docs/adr](docs/adr) for design decisions.
 
+## Compatibility promise (1.0)
+
+From 1.0.0, a breaking change to anything below ships only in a major release (2.0.0), per Velisa ADR-031 ([ADR-014](docs/adr/ADR-014-1-0-compatibility-promise.md)):
+
+- **`STABLE`:** `ingest.offload`, `ingest.verify` and `ingest.inventory`, with these parts:
+  - offload: the single read with fan-out writes, the sha256 / xxh64 read-back, no overwrite and resume, `--project`, `--name-by`, `--reel` and `--dry-run`;
+  - the outputs: `ingest-manifest.json` (`ingest/manifest@1`), the ASC MHL history and the offload and verify reports;
+  - inventory of one folder (`ingest/inventory@2`): card structures, spanned clips, sidecar fields, reel / card id and ffprobe facts;
+  - the error codes and exit codes, and the top-level contract fields.
+- **Still experimental**, and these may change in a minor release with a CHANGELOG line:
+  - `ingest.fetch`, which depends on yt-dlp and the sites it reads;
+  - `offload --follow`, `--progress` (with the slow-destination warning) and `--proxy` (with `ingest_proxies`);
+  - the inventory's `sync` facts, inventory of several folders and `sync_groups`.
+- **Deprecation:** a `STABLE` entry or option is marked `DEPRECATED` in a minor release, with its replacement named. It keeps working for at least one more minor release and 30 days, and is removed only in a major release.
+
 Not yet: telling whether a recorder still holds a file open (the settle window is the only end-of-recording signal); playlists and authenticated downloads in `fetch`; ASC MHL directory hashes, rename, flatten and collections; recording a verify run as an ASC MHL generation; Panasonic P2 / Canon XF / RED card structures (listed file by file); a recording continued on another card.

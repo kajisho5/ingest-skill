@@ -25,6 +25,14 @@ TOOLS = [
      "argv": ["fetch", "<url>", "--dest", "<dir>", "[--dest <dir> ...]", "[--project <name>]", "[--name <folder>]", "[--hash sha256|xxh64]", "[--format <yt-dlp selector>]", "[--staging <dir>]", "--json"]},
 ]
 
+# The 1.0 compatibility promise (docs/adr/ADR-014-1-0-compatibility-promise.md, Velisa ADR-031): a STABLE entry, and the
+# tool it maps to, changes in a breaking way only in a major release. offload, verify and inventory are the local core this
+# skill has shipped since its first version and the agent calls; fetch (yt-dlp and the sites it reads) stays EXPERIMENTAL.
+# The newer opt-in parts of the STABLE tools that the ADR lists (offload --follow / --progress / --proxy, inventory sync facts
+# and several folders) stay experimental too; a parameter has no lifecycle field, so the ADR and the README say which.
+OPERATIONS = ("offload", "verify", "inventory", "fetch")
+STABLE_OPERATIONS = frozenset({"offload", "verify", "inventory"})
+
 ERRORS = {
     "SOURCE_NOT_FOUND": {"exit_code": 2, "retryable": False},
     "NO_DESTINATION": {"exit_code": 2, "retryable": False},
@@ -58,10 +66,8 @@ def contract() -> Dict[str, Any]:
         "skill": {"id": SKILL_ID, "package": "ingest-skill", "version": __version__},
         "version": __version__,
         "contract_version": CONTRACT_VERSION,
-        "provides": [{"id": "ingest.offload", "lifecycle": "EXPERIMENTAL", "tool_id": "ingest/offload"},
-                     {"id": "ingest.verify", "lifecycle": "EXPERIMENTAL", "tool_id": "ingest/verify"},
-                     {"id": "ingest.inventory", "lifecycle": "EXPERIMENTAL", "tool_id": "ingest/inventory"},
-                     {"id": "ingest.fetch", "lifecycle": "EXPERIMENTAL", "tool_id": "ingest/fetch"}],
+        "provides": [{"id": f"ingest.{op}", "lifecycle": "STABLE" if op in STABLE_OPERATIONS else "EXPERIMENTAL", "tool_id": f"ingest/{op}"}
+                     for op in OPERATIONS],
         # No required Skill dependency: ffmpeg-skill is an optional capability (offload --proxy); ffprobe / ffmpeg are optional binaries.
         "dependencies": [],
         "capabilities": {"optional": [{"id": "ffprobe", "kind": "binary", "used_by": ["ingest/inventory"],
