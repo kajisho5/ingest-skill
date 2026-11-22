@@ -266,7 +266,26 @@ def parse_sets(values: Sequence[str]) -> Dict[str, str]:
 
 # ---------------------------------------------------------------- plan
 
-def _files_of(clip: Dict, all_rels: Sequence[str]) -> List[Tuple[str, str, str]]:
+def sidecar_owners(clips: Sequence[Dict], all_rels: Sequence[str]) -> Dict[str, str]:
+    """{file: the first member of the one clip it goes with}: among the clips in the file's folder whose basename starts its name,
+    the one with the longest basename (Interview2.xml is Interview2.mp4's, not Interview.mp4's). Media members belong to their clip."""
+    members = {m["path"] for c in clips for m in c["members"]}
+    by_folder: Dict[str, List[Tuple[str, str]]] = {}
+    for c in clips:
+        first = PurePosixPath(c["members"][0]["path"])
+        by_folder.setdefault(str(first.parent), []).append((first.stem.lower(), str(first)))
+    out: Dict[str, str] = {}
+    for rel in all_rels:
+        if rel in members:
+            continue
+        p = PurePosixPath(rel)
+        hits = [(len(stem), first) for stem, first in by_folder.get(str(p.parent), []) if p.stem.lower().startswith(stem)]
+        if hits:
+            out[rel] = max(hits)[1]
+    return out
+
+
+def _files_of(clip: Dict, all_rels: Sequence[str], owners: Optional[Dict[str, str]] = None) -> List[Tuple[str, str, str]]:
     """[(path, role, remainder)] of one clip: its members (media) and its sidecars, related files and same-basename sidecar files
     in the folder of its first member. remainder: what follows the media basename in the sidecar's name, extension excluded."""
     members = [m["path"] for m in clip["members"]]
@@ -286,6 +305,8 @@ def _files_of(clip: Dict, all_rels: Sequence[str]) -> List[Tuple[str, str, str]]
         p = PurePosixPath(rel)
         if str(p.parent) != parent or not p.stem.lower().startswith(stem.lower()):
             continue   # a sidecar that does not carry the clip's basename (a card index, a proxy folder) is not renamed with it
+        if owners is not None and owners.get(rel) != members[0]:
+            continue   # it carries a longer clip basename (Interview2.xml beside Interview.mp4 and Interview2.mp4)
         seen.add(rel)
         out.append((rel, "sidecar", p.stem[len(stem):]))
     return out
@@ -349,9 +370,11 @@ def plan(folder: str, template: str = DEFAULT_TEMPLATE, values: Optional[Dict[st
     timed.sort(key=lambda t: (0, t[1], t[0]["path"]) if t[1] is not None else (1, datetime.min, t[0]["path"]))
     used_fields = {text for kind, text, _ in parts if kind == "field"}
     taken: Dict[str, set] = {}
+    claimed: Dict[str, set] = {}     # names given to a clip of this plan, per target folder
+    owners = sidecar_owners(inv["clips"], all_rels)
     rows = []
     for seq, (c, dt, why) in enumerate(timed, start=1):
-        files = _files_of(c, all_rels)
+        files = _files_of(c, all_rels, owners)
         first = PurePosixPath(files[0][0])
         fields: Dict[str, Dict[str, Any]] = {}
 
@@ -405,10 +428,12 @@ def plan(folder: str, template: str = DEFAULT_TEMPLATE, values: Optional[Dict[st
         if c.get("growing"):
             row["status"], row["reason"] = "skipped", "a recording still being written (growing): renamed only once sealed"
             continue
+        stem0 = compose(parts, rendered)
         if not meta:
             row["reason"] = "no metadata for this clip: no field of the template has a value besides seq / orig / ext, so its name is kept"
-            continue
-        stem0 = compose(parts, rendered)
+            if dest is None:
+                continue
+            stem0 = first.stem   # --copy-to copies every clip: this one under its own name
         exts = [(rel, role, rem) for rel, role, rem in files]
         spanned = len([f for f in files if f[1] == "media"]) > 1
         longest = max(len((rem + PurePosixPath(rel).suffix.lower()).encode("utf-8")) + (4 if spanned else 0) for rel, role, rem in exts)
@@ -435,11 +460,15 @@ def plan(folder: str, template: str = DEFAULT_TEMPLATE, values: Optional[Dict[st
             return out
         counter = 1
         candidate = names(stem)
-        while any(_key(n) in taken[tkey] and _key(n) not in own for _, _, n in candidate) or len({_key(n) for _, _, n in candidate}) < len(candidate):
+        mine = claimed.setdefault(tkey, set())
+        # a clip may keep its own name (in another case), unless an earlier clip of this plan was given that name
+        while (any(_key(n) in mine or (_key(n) in taken[tkey] and _key(n) not in own) for _, _, n in candidate)
+               or len({_key(n) for _, _, n in candidate}) < len(candidate)):
             counter += 1
             candidate = names(f"{stem}_{counter}")
         for _, _, n in candidate:
             taken[tkey].add(_key(n))
+            mine.add(_key(n))
         prefix = "" if dest is not None or str(first.parent) == "." else str(first.parent) + "/"
         row["files"] = [{"from": rel, "to": prefix + n, "role": role} for rel, role, n in candidate]
         row["to"] = row["files"][0]["to"]
@@ -500,16 +529,52 @@ def _write_json(path: Path, doc: Dict) -> None:
     os.replace(tmp, path)
 
 
+def _same_file(a: Path, b: Path) -> bool:
+    try:
+        return os.path.samefile(a, b)
+    except OSError:
+        return False
+
+
 def _rename(src: Path, dst: Path) -> None:
-    """src → dst, never onto an existing file. A change of case only goes through a temporary name (case-insensitive file systems)."""
-    if os.path.lexists(dst) and not (_key(src.name) == _key(dst.name) and src.parent == dst.parent):
-        raise IngestError("RENAME_REFUSED", f"{dst} exists: never overwritten")
-    if _key(src.name) == _key(dst.name):
+    """src → dst, never onto another file. A change of case only (the same file on a case-insensitive file system) goes through a
+    temporary name. Where hard links work, the new name is made with os.link, which fails when it exists (no window in which a file
+    created meanwhile could be replaced); elsewhere (exFAT, FAT32) the existence check and the rename are as close as the OS allows."""
+    if os.path.lexists(dst):
+        if not _same_file(src, dst):
+            raise IngestError("RENAME_REFUSED", f"{dst} exists: never overwritten")
         tmp = src.with_name(f".{src.name}.ingest-rename")
+        if os.path.lexists(tmp):
+            raise IngestError("RENAME_REFUSED", f"{tmp} exists: never overwritten")
         os.rename(src, tmp)
         os.rename(tmp, dst)
-    else:
+        return
+    try:
+        os.link(src, dst)
+    except FileExistsError:
+        raise IngestError("RENAME_REFUSED", f"{dst} exists: never overwritten") from None
+    except OSError:   # no hard links on this file system
+        if os.path.lexists(dst):
+            raise IngestError("RENAME_REFUSED", f"{dst} exists: never overwritten") from None
         os.rename(src, dst)
+        return
+    os.unlink(src)
+
+
+def _roll_back(root: Path, done: List[Dict]) -> None:
+    for m in reversed(done):   # put back what was renamed
+        try:
+            _rename(root / m["to"], root / m["from"])
+        except (OSError, IngestError):
+            pass
+
+
+def _history_problems(root: Path) -> List[Dict]:
+    """The problems of the folder's ASC MHL history, if it has one: a rename is refused on a damaged history (its generation could
+    not be written, and verify would fail whatever the names)."""
+    if not (root / mhl.FOLDER).exists():
+        return []
+    return list(mhl.read_history(root).problems)
 
 
 def _check_hashes(root: Path, moves: List[Dict], manifest: Dict) -> Tuple[Dict[str, Dict[str, str]], List[Dict]]:
@@ -584,6 +649,11 @@ def apply(folder: str, plan_id: str, template: str = DEFAULT_TEMPLATE, values: O
     if p["mode"] == "copy":
         return _apply_copy(p, root, moves, started, report)
     _, manifest = load_manifest(str(root))
+    hist_problems = _history_problems(root)
+    if hist_problems:
+        report.update(ok=False, failures=hist_problems, finished_at=_now(),
+                      detail="the folder's ASC MHL history has problems: nothing was renamed (run ingest verify)")
+        return report
     digests, bad = _check_hashes(root, moves, manifest)
     if bad:
         report.update(ok=False, failures=bad, finished_at=_now(),
@@ -602,11 +672,7 @@ def apply(folder: str, plan_id: str, template: str = DEFAULT_TEMPLATE, values: O
             _rename(root / m["from"], dst)
             done.append(m)
     except (OSError, IngestError) as e:
-        for m in reversed(done):   # put back what was renamed; nothing else changed yet
-            try:
-                _rename(root / m["to"], root / m["from"])
-            except (OSError, IngestError):
-                pass
+        _roll_back(root, done)   # nothing else changed yet
         record["status"] = "rolled_back"
         _write_json(undo, record)
         report.update(ok=False, failures=[{"code": "RENAME_REFUSED", "detail": str(e)}], finished_at=_now(),
@@ -614,13 +680,21 @@ def apply(folder: str, plan_id: str, template: str = DEFAULT_TEMPLATE, values: O
         return report
     mapping = {m["from"]: m["to"] for m in moves}
     rel_undo = undo.relative_to(root).as_posix()
-    _remap_manifest(root, manifest, mapping, {"at": _now(), "action": "rename", "undo": rel_undo, "files": len(moves), "plan_id": p["plan_id"]}, p["reel"])
+    try:
+        _remap_manifest(root, manifest, mapping, {"at": _now(), "action": "rename", "undo": rel_undo, "files": len(moves), "plan_id": p["plan_id"]}, p["reel"])
+    except OSError as e:   # the manifest is replaced atomically: it still names the original paths, so the names go back too
+        _roll_back(root, done)
+        record["status"] = "rolled_back"
+        _write_json(undo, record)
+        report.update(ok=False, failures=[{"code": "RENAME_REFUSED", "detail": f"writing {MANIFEST_NAME} failed: {e}"}], finished_at=_now(),
+                      detail="the manifest could not be written: the files were put back under their original names")
+        return report
     mhl_path, warns = _mhl_generation(root, moves, digests, manifest["hash"], started, "in-place", previous=True)
     record["status"] = "applied"
     record["mhl"] = mhl_path
     _write_json(undo, record)
-    report.update(ok=True, moved=len(moves), undo=str(undo), manifest=str(root / MANIFEST_NAME), mhl=mhl_path, finished_at=_now())
-    report["warnings"] += warns
+    report.update(ok=not warns, moved=len(moves), undo=str(undo), manifest=str(root / MANIFEST_NAME), mhl=mhl_path, finished_at=_now(),
+                  failures=[{"code": "MHL_INVALID", "detail": w + "; `ingest rename undo` restores the names"} for w in warns])
     return report
 
 
@@ -736,6 +810,8 @@ def undo(folder: str, undo_file: Optional[str] = None) -> Dict:
     report: Dict[str, Any] = {"schema": REPORT_SCHEMA, "action": "undo", "mode": "in_place", "root": str(root), "copy_to": None, "plan_id": rec.get("plan_id"),
                               "rows": [], "counts": {}, "moved": 0, "undo": str(path), "manifest": None, "mhl": None, "failures": problems, "warnings": [],
                               "started_at": _iso(started.timestamp())}
+    if status == "applied":
+        problems += _history_problems(root)
     if problems:
         report.update(ok=False, finished_at=_now(), detail="nothing was renamed back")
         return report
@@ -745,23 +821,25 @@ def undo(folder: str, undo_file: Optional[str] = None) -> Dict:
             _rename(root / m["from"], root / m["to"])
             done.append(m)
     except (OSError, IngestError) as e:
-        for m in reversed(done):
-            try:
-                _rename(root / m["to"], root / m["from"])
-            except (OSError, IngestError):
-                pass
+        _roll_back(root, done)
         report.update(ok=False, failures=[{"code": "RENAME_REFUSED", "detail": str(e)}], finished_at=_now(), detail="a rename failed: the files renamed back so far were put again")
         return report
     # (an interrupted rename may or may not have reached the manifest: entries still under their original paths are left as they are)
-    _remap_manifest(root, manifest, {m["from"]: m["to"] for m in moves},
-                    {"at": _now(), "action": "undo", "undo": path.relative_to(root).as_posix() if str(path).startswith(str(root)) else str(path), "files": len(moves),
-                     "plan_id": rec.get("plan_id")}, {})
+    try:
+        _remap_manifest(root, manifest, {m["from"]: m["to"] for m in moves},
+                        {"at": _now(), "action": "undo", "undo": path.relative_to(root).as_posix() if str(path).startswith(str(root)) else str(path),
+                         "files": len(moves), "plan_id": rec.get("plan_id")}, {})
+    except OSError as e:
+        _roll_back(root, done)
+        report.update(ok=False, failures=[{"code": "RENAME_REFUSED", "detail": f"writing {MANIFEST_NAME} failed: {e}"}], finished_at=_now(),
+                      detail="the manifest could not be written: the renamed names were kept, the undo record is unchanged")
+        return report
     # an interrupted rename wrote no ASC MHL generation (it comes last): its history still names the original paths
     mhl_path, warns = _mhl_generation(root, moves, digests, algo, started, "in-place", previous=True) if status == "applied" else (None, [])
     rec["status"] = "undone"
     rec["undone_at"] = _now()
     _write_json(path, rec)
-    report.update(ok=True, moved=len(moves), manifest=str(root / MANIFEST_NAME), mhl=mhl_path, finished_at=_now(),
-                  rows=[{"from": m["from"], "to": m["to"], "role": m["role"]} for m in moves])
-    report["warnings"] += warns
+    report.update(ok=not warns, moved=len(moves), manifest=str(root / MANIFEST_NAME), mhl=mhl_path, finished_at=_now(),
+                  rows=[{"from": m["from"], "to": m["to"], "role": m["role"]} for m in moves],
+                  failures=[{"code": "MHL_INVALID", "detail": w} for w in warns])
     return report

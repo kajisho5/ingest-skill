@@ -168,13 +168,20 @@ def main(argv: Optional[List[str]] = None) -> int:
                     lines.append(f"  {r['from']} -> {r['to'] if r['files'] else '(kept)'}" + (f"  [{r['reason']}]" if r["reason"] else ""))
                     for f in r["files"][1:]:
                         lines.append(f"      {f['from']} -> {f['to']} ({f['role']})")
+                    for name, v in sorted(r["fields"].items()):
+                        if v.get("value") not in (None, "") and name != "ext":
+                            lines.append(f"      {name} = {v['value']}  ({v['source']})")
                 lines += [f"  warning: {w}" for w in d["warnings"]]
                 _emit(d, a.json, "\n".join(lines))
                 return 0
             _emit(d, a.json, f"{d['action']}: {d['moved']} file(s) " + ("done" if d["ok"] else "NOT done: " + "; ".join(
                 f"{x.get('code')}: {x.get('path') or x.get('detail')}" for x in d["failures"]))
                   + (f"; undo manifest {d['undo']}" if d.get("undo") else ""))
-            return 0 if d["ok"] else ERRORS["INCOMPLETE"]["exit_code"]
+            if d["ok"]:
+                return 0
+            # refused before anything changed (a name taken, a damaged history): exit 2; a changed file or a partial run: exit 3
+            refused = d.get("moved", 0) == 0 and all(x.get("code") in ("RENAME_REFUSED", "MHL_INVALID") for x in d["failures"]) and d["failures"]
+            return ERRORS["RENAME_REFUSED"]["exit_code"] if refused else ERRORS["INCOMPLETE"]["exit_code"]
         if a.cmd == "inventory" and len(a.target) > 1:
             if a.reel:
                 raise IngestError("REEL_INVALID", "--reel names one card: give one folder with it")

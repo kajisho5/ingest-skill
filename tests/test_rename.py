@@ -252,7 +252,7 @@ class RenameTests(Base):
     def test_an_interrupted_rename_can_be_put_back_with_its_undo_manifest(self):
         copy = self.offloaded({"d/A.MOV": os.urandom(700), "d/B.MOV": os.urandom(600)})
         p = rename.plan(str(copy), values={"event": "E"})
-        real = os.rename
+        real = rename._rename
         calls = []
 
         def stop_after_one(src, dst):   # the process stops after the first rename (a crash, a pulled cable)
@@ -261,7 +261,7 @@ class RenameTests(Base):
                 raise KeyboardInterrupt
             return real(src, dst)
         from unittest import mock
-        with mock.patch("ingest_skill.rename.os.rename", side_effect=stop_after_one):
+        with mock.patch("ingest_skill.rename._rename", side_effect=stop_after_one):
             with self.assertRaises(KeyboardInterrupt):
                 rename.apply(str(copy), p["plan_id"], values={"event": "E"})
         pending = next((copy / "ingest-rename").glob("*.json"))
@@ -273,6 +273,49 @@ class RenameTests(Base):
         self.assertTrue(r["ok"], r)
         self.assertEqual(sorted(os.listdir(copy / "d")), ["A.MOV", "B.MOV"])
         self.assertTrue(verify(str(copy))["ok"])
+
+    def test_a_sidecar_goes_with_the_clip_of_the_longest_basename(self):
+        copy = self.offloaded({"v/Interview.mp4": os.urandom(500), "v/Interview2.mp4": os.urandom(400), "v/Interview2.xml": b"<x/>",
+                               "v/Interview.xml": b"<y/>"})
+        p, r = self.apply(copy, template="{event}_{seq:02}{ext}", values={"event": "Talk"})
+        self.assertTrue(r["ok"], r)
+        moved = {f["from"]: f["to"] for row in p["rows"] for f in row["files"]}
+        self.assertEqual(sum(1 for row in p["rows"] for f in row["files"] if f["from"] == "v/Interview2.xml"), 1)
+        self.assertEqual(moved["v/Interview2.xml"], moved["v/Interview2.mp4"][:-4] + ".xml")
+        self.assertEqual(moved["v/Interview.xml"], moved["v/Interview.mp4"][:-4] + ".xml")
+        self.assertTrue(verify(str(copy))["ok"])
+
+    def test_two_clips_differing_only_by_case_never_share_a_name(self):
+        probe = self.base / "probe"
+        probe.mkdir()
+        (probe / "a").write_bytes(b"1")
+        if (probe / "A").exists():
+            self.skipTest("case-insensitive file system: two names differing only by case cannot exist here")
+        copy = self.offloaded({"x/talk.MOV": os.urandom(300), "x/TALK.mov": os.urandom(200)})
+        p, r = self.apply(copy, template="{event}{ext}", values={"event": "TALK"})
+        self.assertEqual(len({row["to"].casefold() for row in p["rows"]}), 2, p["rows"])
+        self.assertTrue(r["ok"], r)
+        self.assertEqual(len(os.listdir(copy / "x")), 2, "nothing overwritten")
+        self.assertTrue(verify(str(copy))["ok"])
+
+    def test_rename_never_replaces_another_file(self):
+        a = write(self.base / "r" / "a.mov", b"A")
+        b = write(self.base / "r" / "b.mov", b"B")
+        with self.assertRaises(IngestError):
+            rename._rename(a, b)
+        self.assertEqual((b.read_bytes(), a.read_bytes()), (b"B", b"A"))
+        rename._rename(a, self.base / "r" / "c.mov")
+        self.assertEqual((self.base / "r" / "c.mov").read_bytes(), b"A")
+        self.assertFalse(a.exists())
+
+    def test_a_damaged_history_stops_the_rename(self):
+        copy = self.offloaded({"d/A.MOV": os.urandom(300)})
+        mhl_file = next((copy / "ascmhl").glob("0001_*.mhl"))
+        mhl_file.write_bytes(mhl_file.read_bytes().replace(b"ingest-skill", b"tampered!!!!"))
+        p, r = self.apply(copy, values={"event": "E"})
+        self.assertFalse(r["ok"])
+        self.assertEqual(r["failures"][0]["code"], "MHL_INVALID")
+        self.assertEqual(os.listdir(copy / "d"), ["A.MOV"])
 
     def test_windows_reserved_and_forbidden_characters(self):
         copy = self.offloaded({"v/a.mov": os.urandom(600), "v/b.mov": os.urandom(500)})
@@ -351,6 +394,11 @@ class RenameTests(Base):
         out = self.base / "renamed"
         before = {q: sha(copy / q) for q in tree(copy)}
         p, r = self.apply(copy, values={"event": "Conf"}, copy_to=str(out))
+        # with no metadata at all, --copy-to still copies every clip, under its own name
+        out2 = self.base / "plain"
+        p2, r2 = self.apply(copy, copy_to=str(out2))
+        self.assertTrue(r2["ok"], r2)
+        self.assertEqual(sorted(q for q in tree(out2) if q.endswith((".mp4", ".xml")) and "/" not in q), ["C0001.mp4", "C0001M01.xml", "C0002.mp4"])
         self.assertEqual(p["mode"], "copy")
         self.assertTrue(r["ok"], r)
         self.assertEqual(sorted(q for q in tree(out) if not q.startswith(("ascmhl/", "ingest-rename/"))),

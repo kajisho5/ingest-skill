@@ -37,8 +37,8 @@ proposals) and any analysis it orchestrates. Those are inputs to a name, not the
    to exactly the rows it saw.
 6. **Never overwrites.** Names are compared without case and in NFC (macOS and Windows file systems ignore case). A name already in
    the folder, or given to another clip of the plan, gets `_2`, `_3`, ...; a clip may take its own name in another case (through a
-   temporary name). Every current name counts as taken, so no rename waits on another one.
-7. **Sidecars stay with their media.** Files in the clip's folder whose name starts with the clip's basename (its sidecars, its related
+   temporary name). Every current name counts as taken, so no rename waits on another one. A name given to one clip is never given to another, even when it is that clip's own name in another case. A rename onto an existing name is allowed only when both names are the same file (a case change on a case-insensitive file system); the new name is made with a hard link where the file system has them, which fails when the name exists, so a file created meanwhile is never replaced.
+7. **Sidecars stay with their media.** Files in the clip's folder whose name starts with the clip's basename (the clip with the longest such basename: `Interview2.xml` goes with `Interview2.mp4`, not `Interview.mp4`) (its sidecars, its related
    files, and XML / XMP / LRF / THM / SRT / ... found beside it) get the new basename with the rest of their name kept
    (`C0001M01.XML` → `<new>M01.xml`). Other files (card indexes, notes) are left alone.
 8. **In place** only on an offloaded copy (a manifest: the card itself is never modified), refused while the copy is incomplete
@@ -51,10 +51,11 @@ proposals) and any analysis it orchestrates. Those are inputs to a name, not the
    Reading a history, the records of a previous path move to the new path from that generation on, so `verify` checks every earlier
    generation's hash against the renamed file. `undo` re-hashes the renamed files, renames them back and writes the manifest and a
    generation the same way. `ingest-rename/` is a top-level folder that `scan` skips (status `skipped_rename`), like `ingest-proxies/`.
+   A damaged ASC MHL history refuses the rename before anything moves; a manifest that cannot be written puts the names back; a generation that cannot be written makes the run `ok: false` (undo restores the names).
 9. **Copy** (`--copy-to DIR`, outside the folder): the clips (spanned members as `_p01`, `_p02`, ...) and their sidecars are copied
    flat into DIR under the new names, each through the offload's verified copy (temporary file, fsync, read-back), compared with the
    manifest hash when there is one. DIR gets its own manifest (with `renamed_from`) and ASC MHL history, so `verify DIR` passes. This
-   is the way to rename a structured card's clips. There is nothing to undo in the folder; the undo record lists the copies.
+   is the way to rename a structured card's clips. Every clip is copied, a clip without metadata under its own name. There is nothing to undo in the folder; the undo record lists the copies.
 
 ## Consequences
 
