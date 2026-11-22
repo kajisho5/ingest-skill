@@ -42,6 +42,7 @@ class HashRecord:
     size: Optional[int]
     hashes: Dict[str, Tuple[str, Optional[str]]]  # format -> (value, action)
     generation: str
+    previous_path: Optional[str] = None            # <previousPath>: the file had this path in the generations before (a rename)
 
 
 @dataclass
@@ -86,7 +87,9 @@ def parse_manifest(data: bytes, name: str) -> List[HashRecord]:
         if p is None or not p.text:
             raise ValueError(f"{name}: a hash element without a path")
         fmts = {c.tag.split("}")[-1]: ((c.text or "").strip(), c.get("action")) for c in h if c.tag.split("}")[-1] in MHL_FORMATS}
-        out.append(HashRecord(p.text, int(p.get("size")) if p.get("size") is not None else None, fmts, name))
+        prev = h.find(_q(NS, "previousPath"))
+        out.append(HashRecord(p.text, int(p.get("size")) if p.get("size") is not None else None, fmts, name,
+                              prev.text if prev is not None and prev.text else None))
     return out
 
 
@@ -131,6 +134,10 @@ def read_history(root: Path) -> History:
             continue
         try:
             for r in parse_manifest(data, e.path):
+                # a renamed file (ingest rename, ADR-015): the records of its previous path, in the generations before this
+                # one, are records of the same file under its new path
+                if r.previous_path and r.previous_path != r.path:
+                    h.records[r.path] = h.records.pop(r.previous_path, []) + h.records.get(r.path, [])
                 h.records.setdefault(r.path, []).append(r)
         except ValueError as err:
             h.problems.append({"code": "MHL_INVALID", "detail": str(err)})
@@ -189,6 +196,8 @@ def write_generation(history: History, items: List[Dict], started: datetime, too
         if it.get("mtime"):
             attrs["lastmodificationdate"] = it["mtime"]
         ET.SubElement(h, _q(NS, "path"), attrs).text = it["path"]
+        if it.get("previous_path"):
+            ET.SubElement(h, _q(NS, "previousPath")).text = it["previous_path"]
         for fmt in MHL_FORMATS:
             if fmt in it["hashes"]:
                 value, action = it["hashes"][fmt]

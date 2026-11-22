@@ -347,11 +347,11 @@ class InventoryAndContractTests(unittest.TestCase):
         c = contract()
         for k in ("skill_id", "id", "skill", "version", "contract_version", "provides", "dependencies", "not_provided"):
             self.assertIn(k, c)
-        self.assertEqual({p["id"] for p in c["provides"]}, {"ingest.offload", "ingest.verify", "ingest.inventory", "ingest.fetch"})
+        self.assertEqual({p["id"] for p in c["provides"]}, {"ingest.offload", "ingest.verify", "ingest.inventory", "ingest.fetch", "ingest.rename"})
         # Only fetch touches the network (ADR-005); offload, verify and inventory stay local.
         self.assertEqual(c["execution"]["network_tools"], ["ingest/fetch"])
         self.assertEqual({t["tool_id"]: t["network"] for t in c["tools"]},
-                         {"ingest/offload": False, "ingest/verify": False, "ingest/inventory": False, "ingest/fetch": True})
+                         {"ingest/offload": False, "ingest/verify": False, "ingest/inventory": False, "ingest/fetch": True, "ingest/rename": False})
         code, out = run_cli("contract")
         self.assertEqual(json.loads(out)["version"], c["version"])
 
@@ -382,6 +382,8 @@ class InventoryAndContractTests(unittest.TestCase):
             {"id": "ingest.verify", "lifecycle": "STABLE", "tool_id": "ingest/verify"},
             {"id": "ingest.inventory", "lifecycle": "STABLE", "tool_id": "ingest/inventory"},
             {"id": "ingest.fetch", "lifecycle": "EXPERIMENTAL", "tool_id": "ingest/fetch"},
+            # ADR-015 (1.1.0): added after the four, EXPERIMENTAL
+            {"id": "ingest.rename", "lifecycle": "EXPERIMENTAL", "tool_id": "ingest/rename"},
         ])
         self.assertLessEqual(STABLE_OPERATIONS, set(OPERATIONS))
         self.assertEqual([t["tool_id"] for t in c["tools"]], [f"ingest/{op}" for op in OPERATIONS])

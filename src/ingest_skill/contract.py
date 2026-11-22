@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any, Dict
 
 from . import __version__
+from .rename import COMPUTED, DEFAULT_TEMPLATE
 
 SKILL_ID = "ingest"
 CONTRACT_VERSION = "1.0"
@@ -23,6 +24,14 @@ TOOLS = [
     {"tool_id": "ingest/fetch", "role": "execution", "writes_media": True, "mutates_input": False, "deterministic": False, "network": True,
      "description": "Download one video URL with yt-dlp (optional extra) into a staging folder, then offload it to every destination exactly like a card (verified copies, ingest-manifest.json, ASC MHL history); the manifest records the source URL (credentials redacted), the extractor, the yt-dlp version, the format id and the time",
      "argv": ["fetch", "<url>", "--dest", "<dir>", "[--dest <dir> ...]", "[--project <name>]", "[--name <folder>]", "[--hash sha256|xxh64]", "[--format <yt-dlp selector>]", "[--staging <dir>]", "--json"]},
+    {"tool_id": "ingest/rename", "role": "execution", "writes_media": True, "mutates_input": True, "deterministic": True, "network": False,
+     "description": "Rename the clips of an offloaded copy from a template ({date}_{event}_{room}_{camera}_{scene:S02}_{speaker:Speaker-}_{seq:04}{ext}): "
+                    "plan previews old -> new names with each field's value and reason and writes nothing; apply runs the previewed plan (--plan-id), "
+                    "re-hashes every file first, never overwrites (a taken name gets a counter), keeps sidecars on their clip's basename, rewrites the "
+                    "manifest and appends an ASC MHL generation (previousPath) so verify still passes, and writes an undo manifest; undo restores the "
+                    "names. With --copy-to, verified copies under the new names in another folder instead (the folder is only read)",
+     "argv": ["rename", "plan|apply|undo", "<folder>", "[--template <t>]", "[--set <field>=<value> ...]", "[--fields <ingest/rename-fields@1 file>]",
+              "[--utc-offset +HH:MM]", "[--date-from-mtime]", "[--copy-to <dir>]", "[--plan-id <id>]", "[--undo <file>]", "--json"]},
 ]
 
 # The 1.0 compatibility promise (docs/adr/ADR-014-1-0-compatibility-promise.md, Velisa ADR-031): a STABLE entry, and the
@@ -30,7 +39,8 @@ TOOLS = [
 # skill has shipped since its first version and the agent calls; fetch (yt-dlp and the sites it reads) stays EXPERIMENTAL.
 # The newer opt-in parts of the STABLE tools that the ADR lists (offload --follow / --progress / --proxy, inventory sync facts
 # and several folders) stay experimental too; a parameter has no lifecycle field, so the ADR and the README say which.
-OPERATIONS = ("offload", "verify", "inventory", "fetch")
+# rename (ADR-015, 1.1.0) is EXPERIMENTAL: it is new, and it changes the names inside a verified copy.
+OPERATIONS = ("offload", "verify", "inventory", "fetch", "rename")
 STABLE_OPERATIONS = frozenset({"offload", "verify", "inventory"})
 
 ERRORS = {
@@ -50,6 +60,12 @@ ERRORS = {
     "NAME_INVALID": {"exit_code": 2, "retryable": False},
     "FETCH_UNAVAILABLE": {"exit_code": 2, "retryable": False},
     "FETCH_FAILED": {"exit_code": 3, "retryable": True},
+    # ingest rename (ADR-015): refusals before anything is renamed.
+    "TEMPLATE_INVALID": {"exit_code": 2, "retryable": False},
+    "FIELDS_INVALID": {"exit_code": 2, "retryable": False},
+    "PLAN_CHANGED": {"exit_code": 2, "retryable": False},
+    "RENAME_REFUSED": {"exit_code": 2, "retryable": False},
+    "UNDO_INVALID": {"exit_code": 2, "retryable": False},
     "INCOMPLETE": {"exit_code": 3, "retryable": True},
     # Per-file failures: recorded in that file's `detail`, and the run ends INCOMPLETE.
     "SOURCE_CHANGED": {"exit_code": 3, "retryable": True},
@@ -86,7 +102,9 @@ def contract() -> Dict[str, Any]:
         "not_provided": ["editing or transcoding (video-editing-skill / ffmpeg-skill)",
                          "encoding proxies itself (offload --proxy queues ffmpeg-skill proxy; the encoder is ffmpeg-skill's)",
                          "cloud upload (publish-skill)", "deleting or formatting the source card",
-                         "ASC MHL directory / root hashes, rename, flatten and collections (not yet)",
+                         "ASC MHL directory / root hashes, flatten and collections (not yet); a rename is recorded per file with previousPath (ingest rename)",
+                         "renaming the clips of a structured card in place (its index files name them; ingest rename --copy-to makes renamed copies)",
+                         "choosing speaker names or scene numbers (ingest rename takes them from the caller's fields file)",
                          "recording a verify run as an ASC MHL generation (verify writes nothing)",
                          "legacy MHL v1 (pre-ASC) files", "network access outside ingest fetch",
                          "authenticated downloads (cookies, logins, .netrc, browser cookies) and DRM-protected media (never circumvented)",
@@ -131,5 +149,13 @@ def contract() -> Dict[str, Any]:
                   "recorded": ["source_url", "webpage_url", "redacted", "extractor", "extractor_key", "downloader", "format_selector", "format_id",
                                "id", "title", "duration", "is_live", "was_live", "live_from_start", "files", "started_at", "fetched_at"],
                   "never_recorded": ["cookies", "request headers", "credentials in URLs (userinfo, token / signature / key / password-like parameters)", "the media URL downloaded from"]},
+        # ingest rename (ADR-015), EXPERIMENTAL: preview, apply, undo.
+        "rename": {"plan_schema": "ingest/rename-plan@1", "report_schema": "ingest/rename-report@1", "undo_schema": "ingest/rename-undo@1",
+                   "fields_schema": "ingest/rename-fields@1", "undo_folder": "ingest-rename", "default_template": DEFAULT_TEMPLATE,
+                   "computed_fields": list(COMPUTED), "safe_names": "NFC; no <>:\"/\\|?* or control characters; no Windows reserved names; no trailing dot or space; at most 255 UTF-8 bytes",
+                   "collisions": "a counter (_2, _3, ...); never overwrites", "sidecars": "keep their clip's basename",
+                   "in_place": "offloaded copies only (a manifest), generic clips only; manifest paths rewritten, ASC MHL generation (process in-place, previousPath)",
+                   "copy": "--copy-to: verified copies under the new names, with their own manifest and ASC MHL history",
+                   "manifest_keys": ["renames", "renamed_from"]},
         "errors": ERRORS,
     }

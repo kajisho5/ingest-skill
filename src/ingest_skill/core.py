@@ -45,6 +45,8 @@ MANIFEST_SCHEMA = "ingest/manifest@1"
 JUNK_NAMES = {".DS_Store", "Thumbs.db", "desktop.ini", ".Spotlight-V100", ".Trashes", ".fseventsd", ".TemporaryItems", "System Volume Information", "$RECYCLE.BIN"}
 MEDIA_EXTENSIONS = cards.MEDIA_EXTENSIONS
 NAME_BY = ("folder", "reel")
+# `ingest rename` (rename.py, ADR-015) keeps its undo manifests in this top-level folder of a renamed copy: not media, never copied.
+RENAME_FOLDER = "ingest-rename"
 
 
 @dataclass
@@ -53,7 +55,7 @@ class FileRecord:
     size: int
     sha256: Optional[str] = None
     mtime: Optional[str] = None
-    status: str = "pending"        # copied | skipped_identical | conflict | failed | growing | skipped_junk | skipped_symlink | skipped_ascmhl | skipped_proxies | skipped_manifest | planned
+    status: str = "pending"        # copied | skipped_identical | conflict | failed | growing | skipped_junk | skipped_symlink | skipped_ascmhl | skipped_proxies | skipped_rename | skipped_manifest | planned
     detail: str = ""
     hashes: Dict[str, str] = field(default_factory=dict)   # every digest taken: the offload hash and the ASC MHL format(s)
 
@@ -143,7 +145,9 @@ def scan(source: Path) -> Tuple[List[Path], List[FileRecord]]:
                 skipped.append(FileRecord(name, 0, status="skipped_ascmhl", detail="ASC MHL history: carried into each destination's ascmhl/ history, not copied as media"))
             elif top and name == proxies.FOLDER:
                 skipped.append(FileRecord(name, 0, status="skipped_proxies", detail="proxies made by offload --proxy (ADR-010): not media of this folder, not copied"))
-        dirnames[:] = sorted(n for n in dirnames if not (d / n).is_symlink() and not _is_junk((d / n).relative_to(source)) and not (top and n in (mhl.FOLDER, proxies.FOLDER)))
+            elif top and name == RENAME_FOLDER:
+                skipped.append(FileRecord(name, 0, status="skipped_rename", detail="undo manifests of ingest rename (ADR-015): not media of this folder, not copied"))
+        dirnames[:] = sorted(n for n in dirnames if not (d / n).is_symlink() and not _is_junk((d / n).relative_to(source)) and not (top and n in (mhl.FOLDER, proxies.FOLDER, RENAME_FOLDER)))
         for name in sorted(filenames):
             p = d / name
             rel = p.relative_to(source)
