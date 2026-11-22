@@ -15,7 +15,7 @@ v0.1.0 on main, SKILL.md on the default branch. Python 3.9+ stdlib (`xxhash` and
 |---|---|---|
 | 素材取り込み(検証付きコピー) | done |  |
 | 二重バックアップ | done | the source is read once per file and written to every destination in parallel; each destination read back and verified on its own; a failed drive does not stop the others (ADR-004) |
-| 素材台帳 | done | one clip per recording (Sony XDCAM / XAVC, XDCAM EX, AVCHD, BRAW, generic), camera sidecars, reel / card id, ffprobe facts, sync facts and multicam sync-group candidates; P2 / Canon XF / RED listed file by file |
+| 素材台帳 | done | rename from a template keeps the ledger (manifest, ASC MHL) in step (step 13, ADR-015); one clip per recording (Sony XDCAM / XAVC, XDCAM EX, AVCHD, BRAW, generic), camera sidecars, reel / card id, ffprobe facts, sync facts and multicam sync-group candidates; P2 / Canon XF / RED listed file by file |
 | URL素材取得 | done | `ingest fetch <url>` ([#9](https://github.com/kajisho5/ingest-skill/pull/9), ADR-005); the agent calls `ingest fetch` instead of its own yt-dlp (video-production-agent#77, its ADR-059) |
 
 ## Wiring
@@ -58,6 +58,10 @@ The agent's adapter runs `offload` / `inventory` (step 6, video-production-agent
 
 - [x] **12. 1.0.0: the compatibility promise** — `offload`, `verify` and `inventory` are `STABLE`; `fetch` and the newer opt-in parts (`--follow`, `--progress`, `--proxy`, sync facts and sync groups) stay experimental (Velisa ADR-031 / D46) ([#30](https://github.com/kajisho5/ingest-skill/pull/30), ADR-014)
   - Done when: the contract marks the three local tools `STABLE` with a `none` contract diff, the README and an ADR state the promise, and 1.0.0 is released and re-pinned by the agent
+
+- [x] **13. Rename from a template (EXPERIMENTAL)** — `ingest rename plan | apply | undo`: sortable names for an offloaded copy's clips from a template (date, reel / camera, seq from this skill; event, room, scene, speaker from the caller), preview first, never overwriting, sidecars kept on their clip's basename, the manifest and the ASC MHL history kept in step so `verify` passes, an undo manifest; `--copy-to` for renamed copies ([#31](https://github.com/kajisho5/ingest-skill/pull/31), ADR-015; the agent's smart rename calls it)
+  - なぜ要るか：カード取り込み後の `C0001.MP4` / `DSC_1234.MOV` を、学会・イベント収録で日付・会場・カメラ・登壇者の並ぶ名前にそろえられる
+  - Done when: a preview writes nothing; apply renames only the previewed plan, keeps sidecars with their media and gives a counter on a collision; `verify` passes after apply and after undo, and undo restores the original names exactly; Windows-reserved names and Japanese (NFC) names are covered by tests on real files; with no metadata nothing changes
 
 ## Boundaries
 

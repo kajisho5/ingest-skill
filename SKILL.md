@@ -20,6 +20,7 @@ Run `ingest <command> ... --json` (installed by `pip install -e .`). Every comma
 | Group cameras and a recorder for multicam | `ingest inventory /Volumes/SSD1/Footage/ev/CAM_A /Volumes/SSD1/Footage/ev/CAM_B /Volumes/SSD1/Footage/ev/REC --json` (`sync_groups`) |
 | Name the copy after the card's reel | add `--name-by reel` to offload (`--reel B007` to set it yourself) |
 | Download a video URL as footage | `ingest fetch "<url>" --dest /Volumes/SSD1/Footage --project 2026-10-30_event --json` (needs `pip install -e ".[fetch]"`; check `yt-dlp` in `ingest doctor --json`) |
+| Give the clips of a copy sortable names | `ingest rename plan <copy> --set event=ConfName --set "room=Room A" --set camera=CamB [--fields fields.json] --json` (preview), then after the user agrees `ingest rename apply <copy> <same options> --plan-id <id> --json`; `ingest rename undo <copy> --json` restores the names; `--copy-to DIR` for renamed copies instead (EXPERIMENTAL) |
 | What this skill declares | `ingest contract --json`, `ingest doctor --json` |
 
 ## What it guarantees
@@ -40,7 +41,7 @@ Run `ingest <command> ... --json` (installed by `pip install -e .`). Every comma
 
 Fetch only what the user has the right to download (their own footage, licensed or permitted material); if that is unclear, ask before fetching. There is no DRM, login or cookie option, and none should be worked around: a protected or login-only video fails as `FETCH_FAILED`, report it as such.
 
-Exit codes: `0` ok, `2` refused (including `HASH_UNAVAILABLE`: xxh64 without the xxhash extra, `FETCH_UNAVAILABLE`: fetch without the yt-dlp extra, `URL_INVALID`, `NAME_INVALID` and `REEL_INVALID`), `3` incomplete (including `FETCH_FAILED`) (conflict, failure, missing or changed file, damaged ASC MHL history).
+Exit codes: `0` ok, `2` refused (including `HASH_UNAVAILABLE`: xxh64 without the xxhash extra, `FETCH_UNAVAILABLE`: fetch without the yt-dlp extra, `URL_INVALID`, `NAME_INVALID`, `REEL_INVALID`, and for rename `TEMPLATE_INVALID`, `FIELDS_INVALID`, `PLAN_CHANGED`, `RENAME_REFUSED`, `UNDO_INVALID`), `3` incomplete (including `FETCH_FAILED`) (conflict, failure, missing or changed file, damaged ASC MHL history).
 
 ## Report it honestly
 
@@ -57,7 +58,8 @@ Exit codes: `0` ok, `2` refused (including `HASH_UNAVAILABLE`: xxh64 without the
 - A `slow_destination` warning (or one in `destinations[].warnings`) names the drive that sets the pace: say which one and suggest another port, cable or drive; it is not a failure. `eta_s` is an estimate from the rate so far (null with `--follow`).
 - `proxy.failed` items are proxies that ffmpeg-skill could not make: the copies are still verified (`ok` is about the copies only); name the clips and the error. `proxy.encoder` is `hw` only when ffmpeg-skill's own doctor reported a hardware encoder its tools can use (VideoToolbox); otherwise say it ran on the CPU.
 - Two copies on the same physical drive are not a backup; say so if both destinations are on one volume.
+- `rename plan` writes nothing: show the user its rows (old → new, and each field's `source`) and apply only after they agree, with the plan's `plan_id`. `PLAN_CHANGED` means the folder or the options changed since: preview again. A `skipped` row (a structured card in place, an incomplete copy, a growing file) and an `unchanged` row ("no metadata") are kept on purpose; say why from `reason`. A speaker or a scene is only what the fields file said: never invent one. After `apply`, name the undo manifest (`undo`); `verify` on the folder passes (with `--copy-to`, `verify` the `copy_to` folder: the source keeps its names and may have no manifest). Renaming one destination does not rename the other backup: run the same plan on each.
 
 ## Not this skill's job
 
-Playlists, logins / cookies and DRM-protected media in `fetch`; editing or transcoding (video-editing-skill / ffmpeg-skill), encoding proxies (ffmpeg-skill `proxy`; `offload --proxy` only queues it), cloud upload (publish-skill), deleting or formatting the card, ASC MHL directory hashes / rename / flatten / collections (not yet), P2 / Canon XF / RED structures (listed as generic files).
+Playlists, logins / cookies and DRM-protected media in `fetch`; editing or transcoding (video-editing-skill / ffmpeg-skill), encoding proxies (ffmpeg-skill `proxy`; `offload --proxy` only queues it), cloud upload (publish-skill), deleting or formatting the card, ASC MHL directory hashes / flatten / collections (not yet), choosing speaker names or scene numbers (the caller's fields file gives them), P2 / Canon XF / RED structures (listed as generic files).

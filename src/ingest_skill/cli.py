@@ -15,6 +15,7 @@ from .core import NAME_BY, IngestError, doctor, inventory, inventory_set, offloa
 from .fetch import fetch
 from .hashing import DEFAULT_HASH, OFFLOAD_HASHES
 from .progress import json_lines
+from . import rename as rename_mod
 
 
 def _emit(doc: Dict[str, Any], as_json: bool, summary: str) -> None:
@@ -102,6 +103,28 @@ def main(argv: Optional[List[str]] = None) -> int:
     p.add_argument("target", nargs="+")
     p.add_argument("--reel", help="the card's reel / card id, overriding the manifest, the clip names and the fingerprint")
     p.add_argument("--json", action="store_true")
+    p = sub.add_parser("rename", help="rename the clips of an offloaded copy from a template: plan (preview, writes nothing), apply (the previewed "
+                                      "plan), undo (EXPERIMENTAL, ADR-015)")
+    rsub = p.add_subparsers(dest="rename_cmd", required=True)
+    for name, hlp in (("plan", "old -> new name of every clip, each field's value and reason; writes nothing"),
+                      ("apply", "run the plan a preview printed (--plan-id): rename (or --copy-to), manifest, ASC MHL, undo manifest"),
+                      ("undo", "rename the files of the last applied rename (or --undo FILE) back to their original names")):
+        q = rsub.add_parser(name, help=hlp)
+        q.add_argument("folder")
+        q.add_argument("--json", action="store_true")
+        if name == "undo":
+            q.add_argument("--undo", dest="undo_file", help="an ingest-rename/<time>.json undo manifest (default: the last applied one)")
+            continue
+        q.add_argument("--template", default=rename_mod.DEFAULT_TEMPLATE,
+                       help="file name template ending with {ext}; fields {name} or {name:spec} (spec: [prefix][0N] or a strftime format for "
+                            "date / time); a missing field is dropped with its separator (default %(default)s)")
+        q.add_argument("--set", dest="sets", action="append", default=[], metavar="FIELD=VALUE", help="a value for every clip, e.g. event=ConfName, room=Room A, camera=CamB")
+        q.add_argument("--fields", help="per-clip values (ingest/rename-fields@1), e.g. scene and speaker from your own analysis")
+        q.add_argument("--utc-offset", help="move UTC capture times (container creation time) to local time, e.g. +09:00")
+        q.add_argument("--date-from-mtime", action="store_true", help="when a clip has no recorded capture time, use its file modification time")
+        q.add_argument("--copy-to", help="copy each clip and its sidecars into this folder under the new names (verified), instead of renaming in place")
+        if name == "apply":
+            q.add_argument("--plan-id", required=True, help="the plan_id that `ingest rename plan` printed for the same folder and options")
     a = ap.parse_args(argv)
     try:
         if a.cmd == "contract":
@@ -131,6 +154,34 @@ def main(argv: Optional[List[str]] = None) -> int:
             mhl_note = "" if d["mhl"] is None else f"; ASC MHL {d['mhl']['generations']} generation(s), {len(d['mhl']['problems'])} problem(s)"
             _emit(d, a.json, f"{d['ok_files']}/{d['checked']} verified; missing {len(d['missing'])}, changed {len(d['changed'])}, unlisted {len(d['unlisted'])}{mhl_note}")
             return 0 if d["ok"] else ERRORS["INCOMPLETE"]["exit_code"]
+        if a.cmd == "rename":
+            if a.rename_cmd == "undo":
+                d = rename_mod.undo(a.folder, a.undo_file)
+            else:
+                opts = dict(template=a.template, values=rename_mod.parse_sets(a.sets), fields_file=a.fields, utc_offset=a.utc_offset,
+                            date_from_mtime=a.date_from_mtime, copy_to=a.copy_to)
+                d = rename_mod.plan(a.folder, **opts) if a.rename_cmd == "plan" else rename_mod.apply(a.folder, a.plan_id, **opts)
+            if a.rename_cmd == "plan":
+                lines = [f"{d['mode']}: {d['counts']['rename'] + d['counts']['copy']} to {'copy' if d['mode'] == 'copy' else 'rename'}, "
+                         f"{d['counts']['unchanged']} unchanged, {d['counts']['skipped']} skipped; plan_id {d['plan_id']} (nothing written)"]
+                for r in d["rows"]:
+                    lines.append(f"  {r['from']} -> {r['to'] if r['files'] else '(kept)'}" + (f"  [{r['reason']}]" if r["reason"] else ""))
+                    for f in r["files"][1:]:
+                        lines.append(f"      {f['from']} -> {f['to']} ({f['role']})")
+                    for name, v in sorted(r["fields"].items()):
+                        if v.get("value") not in (None, "") and name != "ext":
+                            lines.append(f"      {name} = {v['value']}  ({v['source']})")
+                lines += [f"  warning: {w}" for w in d["warnings"]]
+                _emit(d, a.json, "\n".join(lines))
+                return 0
+            _emit(d, a.json, f"{d['action']}: {d['moved']} file(s) " + ("done" if d["ok"] else "NOT done: " + "; ".join(
+                f"{x.get('code')}: {x.get('path') or x.get('detail')}" for x in d["failures"]))
+                  + (f"; undo manifest {d['undo']}" if d.get("undo") else ""))
+            if d["ok"]:
+                return 0
+            # refused before anything changed (a name taken, a damaged history): exit 2; a changed file or a partial run: exit 3
+            refused = d.get("moved", 0) == 0 and all(x.get("code") in ("RENAME_REFUSED", "MHL_INVALID") for x in d["failures"]) and d["failures"]
+            return ERRORS["RENAME_REFUSED"]["exit_code"] if refused else ERRORS["INCOMPLETE"]["exit_code"]
         if a.cmd == "inventory" and len(a.target) > 1:
             if a.reel:
                 raise IngestError("REEL_INVALID", "--reel names one card: give one folder with it")
