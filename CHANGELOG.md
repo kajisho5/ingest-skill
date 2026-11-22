@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.1.0 - 2026-11-22
+
+- feat(rename): ingest rename plan | apply | undo from a template (EXPERIMENTAL, ADR-015) (#31) (103fb70)
+
 ## v1.0.0 - 2026-11-21
 
 - feat!: 1.0.0 - offload, verify and inventory are STABLE; breaking changes to them only in a major release (ADR-014) (#30) (e03f743)
