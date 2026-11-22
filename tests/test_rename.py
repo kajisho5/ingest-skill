@@ -249,6 +249,31 @@ class RenameTests(Base):
         code, out = run_cli("rename", "undo", str(copy), "--json")
         self.assertEqual(json.loads(out)["error"]["code"], "UNDO_INVALID", "nothing left to undo")
 
+    def test_an_interrupted_rename_can_be_put_back_with_its_undo_manifest(self):
+        copy = self.offloaded({"d/A.MOV": os.urandom(700), "d/B.MOV": os.urandom(600)})
+        p = rename.plan(str(copy), values={"event": "E"})
+        real = os.rename
+        calls = []
+
+        def stop_after_one(src, dst):   # the process stops after the first rename (a crash, a pulled cable)
+            calls.append((src, dst))
+            if len(calls) > 1:
+                raise KeyboardInterrupt
+            return real(src, dst)
+        from unittest import mock
+        with mock.patch("ingest_skill.rename.os.rename", side_effect=stop_after_one):
+            with self.assertRaises(KeyboardInterrupt):
+                rename.apply(str(copy), p["plan_id"], values={"event": "E"})
+        pending = next((copy / "ingest-rename").glob("*.json"))
+        self.assertEqual(json.loads(pending.read_text(encoding="utf-8"))["status"], "pending")
+        self.assertFalse(verify(str(copy))["ok"], "half renamed: the manifest still names the old paths")
+        with self.assertRaises(IngestError):
+            rename.undo(str(copy))   # the last applied one: there is none
+        r = rename.undo(str(copy), str(pending))
+        self.assertTrue(r["ok"], r)
+        self.assertEqual(sorted(os.listdir(copy / "d")), ["A.MOV", "B.MOV"])
+        self.assertTrue(verify(str(copy))["ok"])
+
     def test_windows_reserved_and_forbidden_characters(self):
         copy = self.offloaded({"v/a.mov": os.urandom(600), "v/b.mov": os.urandom(500)})
         f = self.fields({"v/a.mov": {"speaker": "CON"}, "v/b.mov": {"speaker": 'Dr. O\'Brien: "Q&A"?'}})

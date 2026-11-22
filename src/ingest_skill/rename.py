@@ -703,18 +703,24 @@ def undo(folder: str, undo_file: Optional[str] = None) -> Dict:
         raise IngestError("UNDO_INVALID", f"{path} is not an {UNDO_SCHEMA} document")
     if rec.get("mode") != "in_place":
         raise IngestError("UNDO_INVALID", f"{path} records copies (--copy-to): the folder's own names never changed, so there is nothing to restore")
-    if rec.get("status") != "applied":
-        raise IngestError("UNDO_INVALID", f"{path} is {rec.get('status')!r}, not an applied rename")
+    status = rec.get("status")
+    if status not in ("applied", "pending"):
+        raise IngestError("UNDO_INVALID", f"{path} is {status!r}, not an applied rename")
+    if status == "pending" and not undo_file:
+        raise IngestError("UNDO_INVALID", f"{path} records a rename that was interrupted: give it with --undo to put back what it renamed")
     if Path(rec.get("root") or "").resolve() != root:
         raise IngestError("UNDO_INVALID", f"{path} belongs to {rec.get('root')}, not {root}")
     _, manifest = load_manifest(str(root))
     algo = rec.get("hash") or manifest["hash"]
     fmt = MHL_FORMAT_FOR[algo]
     require([algo])
-    moves = [{"from": e["to"], "to": e["from"], "role": e.get("role", "media")} for e in rec["entries"]]
+    entries = rec["entries"]
+    if status == "pending":   # interrupted (the process was stopped): only the files it had renamed go back; the rest never moved
+        entries = [e for e in entries if (root / e["to"]).is_file() and not (root / e["from"]).exists()]
+    moves = [{"from": e["to"], "to": e["from"], "role": e.get("role", "media")} for e in entries]
     problems = []
     digests: Dict[str, Dict[str, str]] = {}
-    for e, m in zip(rec["entries"], moves):
+    for e, m in zip(entries, moves):
         cur, orig = root / m["from"], root / m["to"]
         if not cur.is_file():
             problems.append({"code": "FILE_MISSING", "path": m["from"]})
@@ -746,10 +752,12 @@ def undo(folder: str, undo_file: Optional[str] = None) -> Dict:
                 pass
         report.update(ok=False, failures=[{"code": "RENAME_REFUSED", "detail": str(e)}], finished_at=_now(), detail="a rename failed: the files renamed back so far were put again")
         return report
+    # (an interrupted rename may or may not have reached the manifest: entries still under their original paths are left as they are)
     _remap_manifest(root, manifest, {m["from"]: m["to"] for m in moves},
                     {"at": _now(), "action": "undo", "undo": path.relative_to(root).as_posix() if str(path).startswith(str(root)) else str(path), "files": len(moves),
                      "plan_id": rec.get("plan_id")}, {})
-    mhl_path, warns = _mhl_generation(root, moves, digests, algo, started, "in-place", previous=True)
+    # an interrupted rename wrote no ASC MHL generation (it comes last): its history still names the original paths
+    mhl_path, warns = _mhl_generation(root, moves, digests, algo, started, "in-place", previous=True) if status == "applied" else (None, [])
     rec["status"] = "undone"
     rec["undone_at"] = _now()
     _write_json(path, rec)
